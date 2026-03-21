@@ -57,7 +57,7 @@ const ANOMALY_TYPES = [
   { key: "unassigned",    label: "Unassigned",    color: "#38bdf8", check: (i: Issue) => i.assignees.length === 0 },
 ];
 
-const INSIGHT_TAGS = ["Bugs", "Integrations"];
+const INSIGHT_TAGS = ["Bug", "Lender Integration", "Vendor Integration"];
 
 function isDone(issue: Issue) {
   return issue.state_group === "completed" || issue.state_name.toLowerCase() === "done";
@@ -476,16 +476,18 @@ function InsightsTab({ issues }: { issues: Issue[] }) {
       </div>
 
       {/* Tag insights */}
-      <InsightCard title={`Tags — Bugs & Integrations`} accent="#38bdf8">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
-          {byInsightTag.map(t => (
+      <InsightCard title="Tags — Bug · Lender Integration · Vendor Integration" accent="#38bdf8">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
+          {byInsightTag.map(t => {
+            const color = t.name === "Bug" ? "#ef4444" : t.name === "Lender Integration" ? "#a78bfa" : "#38bdf8";
+            return (
             <div key={t.name} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "0.85rem 1rem", display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ fontSize: "0.82rem", fontWeight: 700, color: t.name === "Bugs" ? "#ef4444" : "#38bdf8" }}>{t.name}</div>
-              <div style={{ fontSize: "2rem", fontWeight: 800, color: t.name === "Bugs" ? "#ef4444" : "#38bdf8", lineHeight: 1 }}>{t.count}</div>
-              <InsightBar label="" count={t.count} total={total} color={t.name === "Bugs" ? "#ef4444" : "#38bdf8"} />
+              <div style={{ fontSize: "0.82rem", fontWeight: 700, color }}>{t.name}</div>
+              <div style={{ fontSize: "2rem", fontWeight: 800, color, lineHeight: 1 }}>{t.count}</div>
+              <InsightBar label="" count={t.count} total={total} color={color} />
               <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>{total > 0 ? ((t.count / total) * 100).toFixed(1) : 0}% of active issues</div>
             </div>
-          ))}
+          )})}
         </div>
       </InsightCard>
     </div>

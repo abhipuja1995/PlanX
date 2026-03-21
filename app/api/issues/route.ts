@@ -54,7 +54,8 @@ export async function GET(req: Request) {
       if (enrich) {
         const cycleResults = await batchedMap(cycles, async (c: any) => {
           const items = arr(await client.listCycleIssues(WS, pid, c.id).catch(() => []));
-          return items.map((ci: any) => ({ iid: ci.issue ?? ci.issue_id, name: cycleMap[c.id]?.name ?? c.id }));
+          // API returns full issue objects — the issue ID is in the `id` field
+          return items.map((ci: any) => ({ iid: ci.id ?? ci.issue ?? ci.issue_id, name: cycleMap[c.id]?.name ?? c.id }));
         });
         for (const entries of cycleResults)
           for (const { iid, name } of (entries as any[]))
@@ -62,7 +63,8 @@ export async function GET(req: Request) {
 
         const modResults = await batchedMap(mods, async (m: any) => {
           const items = arr(await client.listModuleIssues(WS, pid, m.id).catch(() => []));
-          return items.map((mi: any) => ({ iid: mi.issue ?? mi.issue_id, name: moduleMap[m.id]?.name ?? m.id }));
+          // API returns full issue objects — the issue ID is in the `id` field
+          return items.map((mi: any) => ({ iid: mi.id ?? mi.issue ?? mi.issue_id, name: moduleMap[m.id]?.name ?? m.id }));
         });
         for (const entries of modResults)
           for (const { iid, name } of (entries as any[])) {

@@ -1093,7 +1093,7 @@ export default function PlaneDashboard() {
     <main style={{ padding: "2rem", minHeight: "100vh" }}>
       <div style={{ marginBottom: "1.75rem" }}>
         <h1 style={{ fontSize: "1.8rem", fontWeight: 800, background: "linear-gradient(to right, #60a5fa, #c084fc)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text", marginBottom: 4 }}>
-          PlanX
+          Nirmaan
         </h1>
         <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem" }}>
           Workspace: cr-product &middot; {loading ? "Loading..." : `${issues.length} total issues`}
@@ -1146,11 +1146,6 @@ export default function PlaneDashboard() {
       {!loading && !error && activeTab === "insights" && <InsightsTab issues={issues} />}
       {!loading && !error && activeTab === "anomaly"  && <AnomalyTab issues={issues} />}
 
-      {activeTab === "overdue" && !loading && (
-        <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "0.75rem 1.25rem", marginBottom: "1rem", color: "#fca5a5", fontSize: "0.85rem" }}>
-          ⚠️ {filtered.length} issue{filtered.length !== 1 ? "s" : ""} overdue — Done issues excluded — sorted by most days past due
-        </div>
-      )}
 
       {!loading && !error && activeTab !== "anomaly" && activeTab !== "insights" && (
         <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, overflow: "hidden" }}>

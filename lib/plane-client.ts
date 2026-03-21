@@ -30,6 +30,7 @@ export class PlaneClient {
 
   // Members
   listProjectMembers(ws: string, pid: string)     { return this.get(`/api/v1/workspaces/${ws}/projects/${pid}/members/`); }
+  listWorkspaceMembers(ws: string)                { return this.get(`/api/v1/workspaces/${ws}/members/`); }
 
   // Issues
   listIssues(ws: string, pid: string, params = "") { return this.get(`/api/v1/workspaces/${ws}/projects/${pid}/issues/?per_page=250${params}`); }

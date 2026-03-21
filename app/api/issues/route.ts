@@ -9,22 +9,24 @@ function toMap<T>(items: T[], key: keyof T): Record<string, T> {
   return Object.fromEntries(items.map(i => [i[key], i]));
 }
 
-// Process in batches to avoid overwhelming Plane API
 async function batchedMap<T, R>(items: T[], fn: (item: T) => Promise<R>, batchSize = 3): Promise<R[]> {
   const results: R[] = [];
   for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize);
-    const batchResults = await Promise.allSettled(batch.map(fn));
+    const batchResults = await Promise.allSettled(items.slice(i, i + batchSize).map(fn));
     results.push(...batchResults.map(r => r.status === "fulfilled" ? r.value : [] as any));
   }
   return results;
 }
 
-export async function GET() {
+// Stage 1: fast — basic issue data only (no cycle/module N+1 calls)
+// Stage 2: enrich — adds cycle/module mappings via separate /api/enrich endpoint
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const enrich = searchParams.get("enrich") === "1";
+
   try {
     const projects: any[] = arr(await client.listProjects(WS));
 
-    // Fetch all projects in parallel
     const enriched = await Promise.all(projects.map(async (project: any) => {
       const pid = project.id;
 
@@ -37,36 +39,38 @@ export async function GET() {
         client.listProjectMembers(WS, pid).then(arr),
       ]);
 
-      const stateMap  = toMap(states,  "id");
-      const labelMap  = toMap(labels,  "id");
-      const cycleMap  = toMap(cycles,  "id");
-      const moduleMap = toMap(mods,    "id");
+      const stateMap  = toMap(states, "id");
+      const labelMap  = toMap(labels, "id");
+      const cycleMap  = toMap(cycles, "id");
+      const moduleMap = toMap(mods,   "id");
       const memberMap = Object.fromEntries(
         members.map((m: any) => [m.member?.id ?? m.id, m.member ?? m])
       );
 
-      // Fetch cycle-issues + module-issues in batches of 3 (not all at once)
+      // N+1 cycle/module calls — only run on enrich request
       const issueCycle:   Record<string, string>   = {};
       const issueModules: Record<string, string[]> = {};
 
-      const cycleResults = await batchedMap(cycles, async (c: any) => {
-        const items = arr(await client.listCycleIssues(WS, pid, c.id).catch(() => []));
-        return items.map((ci: any) => ({ iid: ci.issue ?? ci.issue_id, name: cycleMap[c.id]?.name ?? c.id }));
-      });
-      for (const entries of cycleResults)
-        for (const { iid, name } of (entries as any[]))
-          if (iid) issueCycle[iid] = name;
+      if (enrich) {
+        const cycleResults = await batchedMap(cycles, async (c: any) => {
+          const items = arr(await client.listCycleIssues(WS, pid, c.id).catch(() => []));
+          return items.map((ci: any) => ({ iid: ci.issue ?? ci.issue_id, name: cycleMap[c.id]?.name ?? c.id }));
+        });
+        for (const entries of cycleResults)
+          for (const { iid, name } of (entries as any[]))
+            if (iid) issueCycle[iid] = name;
 
-      const modResults = await batchedMap(mods, async (m: any) => {
-        const items = arr(await client.listModuleIssues(WS, pid, m.id).catch(() => []));
-        return items.map((mi: any) => ({ iid: mi.issue ?? mi.issue_id, name: moduleMap[m.id]?.name ?? m.id }));
-      });
-      for (const entries of modResults)
-        for (const { iid, name } of (entries as any[])) {
-          if (!iid) continue;
-          issueModules[iid] ??= [];
-          if (!issueModules[iid].includes(name)) issueModules[iid].push(name);
-        }
+        const modResults = await batchedMap(mods, async (m: any) => {
+          const items = arr(await client.listModuleIssues(WS, pid, m.id).catch(() => []));
+          return items.map((mi: any) => ({ iid: mi.issue ?? mi.issue_id, name: moduleMap[m.id]?.name ?? m.id }));
+        });
+        for (const entries of modResults)
+          for (const { iid, name } of (entries as any[])) {
+            if (!iid) continue;
+            issueModules[iid] ??= [];
+            if (!issueModules[iid].includes(name)) issueModules[iid].push(name);
+          }
+      }
 
       function resolveMember(id: string) {
         const m = memberMap[id];
@@ -75,7 +79,6 @@ export async function GET() {
 
       return issues.map((issue: any) => {
         const state = stateMap[issue.state];
-        // Plane returns labels as UUID array in `labels` field (not label_ids)
         const labelIds: string[] = issue.labels ?? issue.label_ids ?? [];
         return {
           id: issue.id,
@@ -91,10 +94,11 @@ export async function GET() {
           created_by_id: issue.created_by,
           created_at: issue.created_at,
           start_date: issue.start_date ?? null,
-          due_date: issue.target_date ?? null,         // Plane uses target_date
+          due_date: issue.target_date ?? null,
           labels: labelIds.map((lid: string) => labelMap[lid]?.name).filter(Boolean),
           cycle: issueCycle[issue.id] ?? null,
           modules: issueModules[issue.id] ?? [],
+          parent: issue.parent ?? null,
           project_id: pid,
           project_name: project.name,
           project_identifier: project.identifier,
@@ -122,6 +126,7 @@ export async function GET() {
     return NextResponse.json(
       {
         issues: allIssues,
+        enriched: enrich,
         filters: {
           projects: projects.map((p: any) => ({ id: p.id, name: p.name })),
           members: Array.from(memberSet.keys()),
@@ -132,12 +137,7 @@ export async function GET() {
           labels: Array.from(labelSet),
         },
       },
-      {
-        headers: {
-          // Cache for 5 minutes at CDN/edge level
-          "Cache-Control": "s-maxage=300, stale-while-revalidate=60",
-        },
-      }
+      { headers: { "Cache-Control": "s-maxage=300, stale-while-revalidate=60" } }
     );
   } catch (err: any) {
     console.error("Plane API error:", err);

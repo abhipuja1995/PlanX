@@ -19,6 +19,7 @@ interface Issue {
   labels: string[];
   cycle: string | null;
   modules: string[];
+  parent: string | null;
   project_id: string;
   project_name: string;
   project_identifier: string;
@@ -32,6 +33,12 @@ interface FilterOptions {
   cycles: string[];
   modules: string[];
   labels: string[];
+}
+
+const PLANE_BASE = "https://nirmaan.credresolve.com";
+
+function issueUrl(issue: Issue) {
+  return `${PLANE_BASE}/cr-product/projects/${issue.project_id}/issues/${issue.id}/`;
 }
 
 const PRIORITY_META: Record<string, { label: string; color: string; bg: string }> = {
@@ -49,6 +56,8 @@ const ANOMALY_TYPES = [
   { key: "no_module",     label: "No Module",     color: "#34d399", check: (i: Issue) => i.modules.length === 0 },
   { key: "unassigned",    label: "Unassigned",    color: "#38bdf8", check: (i: Issue) => i.assignees.length === 0 },
 ];
+
+const INSIGHT_TAGS = ["Bugs", "Integrations"];
 
 function isDone(issue: Issue) {
   return issue.state_group === "completed" || issue.state_name.toLowerCase() === "done";
@@ -74,6 +83,34 @@ function Badge({ text, color, bg }: { text: string; color: string; bg: string })
     <span style={{ display: "inline-block", padding: "2px 8px", borderRadius: "9999px", fontSize: "0.72rem", fontWeight: 600, color, background: bg, whiteSpace: "nowrap" }}>
       {text}
     </span>
+  );
+}
+
+// ── Tag cell with expand/collapse ─────────────────────────────────────────
+function TagCell({ labels, color = "#38bdf8", bg = "rgba(56,189,248,0.1)", emptyColor = "var(--text-secondary)" }: {
+  labels: string[]; color?: string; bg?: string; emptyColor?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (labels.length === 0) return <span style={{ color: emptyColor }}>—</span>;
+  const SHOW = 2;
+  const visible = expanded ? labels : labels.slice(0, SHOW);
+  const hidden = labels.length - SHOW;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+      {visible.map(l => <Badge key={l} text={l} color={color} bg={bg} />)}
+      {!expanded && hidden > 0 && (
+        <button onClick={e => { e.stopPropagation(); setExpanded(true); }}
+          style={{ fontSize: "0.7rem", color: "#60a5fa", background: "rgba(59,130,246,0.1)", border: "none", borderRadius: 9999, padding: "2px 7px", cursor: "pointer", fontWeight: 600 }}>
+          +{hidden}
+        </button>
+      )}
+      {expanded && labels.length > SHOW && (
+        <button onClick={e => { e.stopPropagation(); setExpanded(false); }}
+          style={{ fontSize: "0.7rem", color: "#94a3b8", background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 9999, padding: "2px 7px", cursor: "pointer" }}>
+          less
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -136,8 +173,136 @@ function MultiSelect({ label, selected, options, onChange }: {
   );
 }
 
+// ── Issue row (parent + children) ────────────────────────────────────────
+function IssueRow({ issue, children, showOverdue, depth = 0 }: {
+  issue: Issue;
+  children?: Issue[];
+  showOverdue: boolean;
+  depth?: number;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const hasChildren = children && children.length > 0;
+  const pm = PRIORITY_META[issue.priority] ?? PRIORITY_META.none;
+  const days = overdueDays(issue.due_date);
+  const td: React.CSSProperties = { padding: "9px 14px" };
+  const indentPx = depth * 20;
+
+  return (
+    <>
+      <tr
+        style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}
+        onMouseEnter={e => (e.currentTarget.style.background = depth > 0 ? "rgba(59,130,246,0.06)" : "rgba(59,130,246,0.04)")}
+        onMouseLeave={e => (e.currentTarget.style.background = depth > 0 ? "rgba(59,130,246,0.02)" : "transparent")}
+      >
+        {/* Issue */}
+        <td style={{ ...td, maxWidth: 280 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 6, paddingLeft: indentPx }}>
+            {hasChildren ? (
+              <button onClick={() => setExpanded(x => !x)}
+                style={{ flexShrink: 0, width: 18, height: 18, borderRadius: 4, background: "rgba(59,130,246,0.15)", border: "none", color: "#60a5fa", fontSize: "0.7rem", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 1 }}>
+                {expanded ? "▾" : "▸"}
+              </button>
+            ) : depth === 0 ? (
+              <span style={{ width: 18, flexShrink: 0 }} />
+            ) : (
+              <span style={{ width: 18, flexShrink: 0, color: "var(--text-secondary)", fontSize: "0.8rem", textAlign: "center" }}>↳</span>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <a href={issueUrl(issue)} target="_blank" rel="noopener noreferrer"
+                  style={{ color: "var(--text-secondary)", fontSize: "0.72rem", fontWeight: 600, textDecoration: "none", whiteSpace: "nowrap" }}
+                  onMouseEnter={e => (e.currentTarget.style.color = "#60a5fa")}
+                  onMouseLeave={e => (e.currentTarget.style.color = "var(--text-secondary)")}>
+                  {issue.project_identifier}-{issue.sequence_id}
+                </a>
+                {hasChildren && (
+                  <span style={{ fontSize: "0.68rem", fontWeight: 700, color: "#60a5fa", background: "rgba(59,130,246,0.15)", padding: "1px 6px", borderRadius: 9999 }}>
+                    {children!.length}
+                  </span>
+                )}
+              </div>
+              <a href={issueUrl(issue)} target="_blank" rel="noopener noreferrer"
+                style={{ fontWeight: 500, lineHeight: 1.4, color: "inherit", textDecoration: "none", wordBreak: "break-word" }}
+                onMouseEnter={e => (e.currentTarget.style.color = "#93c5fd")}
+                onMouseLeave={e => (e.currentTarget.style.color = "inherit")}>
+                {issue.name}
+              </a>
+            </div>
+          </div>
+        </td>
+        {/* State */}
+        <td style={td}>
+          <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: issue.state_color, display: "inline-block", flexShrink: 0 }} />
+            <span style={{ fontSize: "0.82rem" }}>{issue.state_name}</span>
+          </span>
+        </td>
+        {/* Priority */}
+        <td style={td}><Badge text={pm.label} color={pm.color} bg={pm.bg} /></td>
+        {/* Assignee */}
+        <td style={{ ...td, minWidth: 110 }}>
+          {issue.assignees.length === 0
+            ? <span style={{ color: "var(--text-secondary)" }}>—</span>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: "0.82rem" }}>{issue.assignees.map(a => <span key={a}>{a}</span>)}</div>}
+        </td>
+        {/* Created by */}
+        <td style={{ ...td, whiteSpace: "nowrap", fontSize: "0.82rem" }}>
+          {issue.created_by || <span style={{ color: "var(--text-secondary)" }}>—</span>}
+        </td>
+        {/* Created */}
+        <td style={{ ...td, whiteSpace: "nowrap", color: "var(--text-secondary)", fontSize: "0.8rem" }}>{fmt(issue.created_at)}</td>
+        {/* Start Date */}
+        <td style={{ ...td, whiteSpace: "nowrap", color: "var(--text-secondary)", fontSize: "0.8rem" }}>{fmt(issue.start_date)}</td>
+        {/* Due Date */}
+        <td style={td}>
+          <span style={{ color: days ? "#ef4444" : "var(--text-secondary)", fontWeight: days ? 600 : 400, fontSize: "0.8rem", whiteSpace: "nowrap" }}>{fmt(issue.due_date)}</span>
+        </td>
+        {/* Overdue col */}
+        {showOverdue && (
+          <td style={td}>
+            {days !== null ? <span style={{ background: "rgba(239,68,68,0.15)", color: "#f87171", padding: "3px 10px", borderRadius: 9999, fontSize: "0.78rem", fontWeight: 700, whiteSpace: "nowrap" }}>{days}d</span> : "—"}
+          </td>
+        )}
+        {/* Cycle */}
+        <td style={td}>
+          {issue.cycle ? <Badge text={issue.cycle} color="#a78bfa" bg="rgba(167,139,250,0.12)" /> : <span style={{ color: "var(--text-secondary)" }}>—</span>}
+        </td>
+        {/* Tags */}
+        <td style={{ ...td, maxWidth: 160 }}>
+          <TagCell labels={issue.labels} />
+        </td>
+        {/* Modules */}
+        <td style={{ ...td, maxWidth: 180 }}>
+          <TagCell labels={issue.modules} color="#34d399" bg="rgba(52,211,153,0.1)" />
+        </td>
+        {/* Project */}
+        <td style={{ ...td, whiteSpace: "nowrap", color: "var(--text-secondary)", fontSize: "0.8rem" }}>{issue.project_name}</td>
+      </tr>
+      {hasChildren && expanded && children!.map(child => (
+        <IssueRow key={child.id} issue={child} showOverdue={showOverdue} depth={depth + 1} />
+      ))}
+    </>
+  );
+}
+
 // ── Issue table ───────────────────────────────────────────────────────────
-function IssueTable({ issues, showOverdue }: { issues: Issue[]; showOverdue: boolean }) {
+function IssueTable({ issues, allIssues, showOverdue }: { issues: Issue[]; allIssues: Issue[]; showOverdue: boolean }) {
+  const childMap = useMemo(() => {
+    const map = new Map<string, Issue[]>();
+    const issueSet = new Set(issues.map(i => i.id));
+    for (const i of allIssues) {
+      if (i.parent && issueSet.has(i.parent)) {
+        if (!map.has(i.parent)) map.set(i.parent, []);
+        map.get(i.parent)!.push(i);
+      }
+    }
+    return map;
+  }, [issues, allIssues]);
+
+  // Show only top-level issues (parent = null, or parent not in current list)
+  const issueSet = useMemo(() => new Set(issues.map(i => i.id)), [issues]);
+  const topLevel = useMemo(() => issues.filter(i => !i.parent || !issueSet.has(i.parent)), [issues, issueSet]);
+
   const th: React.CSSProperties = { padding: "10px 14px", textAlign: "left", color: "var(--text-secondary)", fontWeight: 600, fontSize: "0.72rem", textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap" };
   return (
     <div style={{ overflowX: "auto" }}>
@@ -160,63 +325,169 @@ function IssueTable({ issues, showOverdue }: { issues: Issue[]; showOverdue: boo
           </tr>
         </thead>
         <tbody>
-          {issues.map((issue, idx) => {
-            const pm = PRIORITY_META[issue.priority] ?? PRIORITY_META.none;
-            const days = overdueDays(issue.due_date);
-            return (
-              <tr key={issue.id}
-                style={{ borderBottom: idx < issues.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none" }}
-                onMouseEnter={e => (e.currentTarget.style.background = "rgba(59,130,246,0.04)")}
-                onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-              >
-                <td style={{ padding: "10px 14px", maxWidth: 260 }}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                    <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem", fontWeight: 600 }}>{issue.project_identifier}-{issue.sequence_id}</span>
-                    <span style={{ fontWeight: 500, lineHeight: 1.4 }}>{issue.name}</span>
-                  </div>
-                </td>
-                <td style={{ padding: "10px 14px" }}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
-                    <span style={{ width: 9, height: 9, borderRadius: "50%", background: issue.state_color, display: "inline-block", flexShrink: 0 }} />
-                    {issue.state_name}
-                  </span>
-                </td>
-                <td style={{ padding: "10px 14px" }}><Badge text={pm.label} color={pm.color} bg={pm.bg} /></td>
-                <td style={{ padding: "10px 14px", minWidth: 120 }}>
-                  {issue.assignees.length === 0
-                    ? <span style={{ color: "var(--text-secondary)" }}>—</span>
-                    : <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>{issue.assignees.map(a => <span key={a}>{a}</span>)}</div>}
-                </td>
-                <td style={{ padding: "10px 14px", whiteSpace: "nowrap", fontSize: "0.82rem" }}>
-                  {issue.created_by || <span style={{ color: "var(--text-secondary)" }}>—</span>}
-                </td>
-                <td style={{ padding: "10px 14px", whiteSpace: "nowrap", color: "var(--text-secondary)" }}>{fmt(issue.created_at)}</td>
-                <td style={{ padding: "10px 14px", whiteSpace: "nowrap", color: "var(--text-secondary)" }}>{fmt(issue.start_date)}</td>
-                <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
-                  <span style={{ color: days ? "#ef4444" : "var(--text-secondary)", fontWeight: days ? 600 : 400 }}>{fmt(issue.due_date)}</span>
-                </td>
-                {showOverdue && (
-                  <td style={{ padding: "10px 14px" }}>
-                    {days !== null ? <span style={{ background: "rgba(239,68,68,0.15)", color: "#f87171", padding: "3px 10px", borderRadius: 9999, fontSize: "0.78rem", fontWeight: 700 }}>{days}d overdue</span> : "—"}
-                  </td>
-                )}
-                <td style={{ padding: "10px 14px" }}>
-                  {issue.cycle ? <Badge text={issue.cycle} color="#a78bfa" bg="rgba(167,139,250,0.12)" /> : <span style={{ color: "var(--text-secondary)" }}>—</span>}
-                </td>
-                <td style={{ padding: "10px 14px", maxWidth: 160 }}>
-                  {issue.labels.length === 0 ? <span style={{ color: "var(--text-secondary)" }}>—</span>
-                    : <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>{issue.labels.map(l => <Badge key={l} text={l} color="#38bdf8" bg="rgba(56,189,248,0.1)" />)}</div>}
-                </td>
-                <td style={{ padding: "10px 14px", maxWidth: 180 }}>
-                  {issue.modules.length === 0 ? <span style={{ color: "var(--text-secondary)" }}>—</span>
-                    : <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>{issue.modules.map(m => <Badge key={m} text={m} color="#34d399" bg="rgba(52,211,153,0.1)" />)}</div>}
-                </td>
-                <td style={{ padding: "10px 14px", whiteSpace: "nowrap", color: "var(--text-secondary)" }}>{issue.project_name}</td>
-              </tr>
-            );
-          })}
+          {topLevel.map(issue => (
+            <IssueRow key={issue.id} issue={issue} children={childMap.get(issue.id)} showOverdue={showOverdue} />
+          ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// ── Insight bar ────────────────────────────────────────────────────────────
+function InsightBar({ label, count, total, color }: { label: string; count: number; total: number; color: string }) {
+  const pct = total > 0 ? (count / total) * 100 : 0;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ width: 130, fontSize: "0.78rem", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>{label}</div>
+      <div style={{ flex: 1, height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 9999, overflow: "hidden" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 9999, transition: "width 0.5s ease" }} />
+      </div>
+      <div style={{ width: 42, textAlign: "right", fontSize: "0.78rem", color: "var(--text-secondary)", flexShrink: 0 }}>{count}</div>
+      <div style={{ width: 38, textAlign: "right", fontSize: "0.72rem", color: color, flexShrink: 0, fontWeight: 600 }}>{pct.toFixed(0)}%</div>
+    </div>
+  );
+}
+
+function InsightCard({ title, children, accent }: { title: string; children: React.ReactNode; accent: string }) {
+  return (
+    <div style={{ background: "var(--bg-card)", border: `1px solid ${accent}33`, borderRadius: 12, padding: "1.25rem 1.5rem", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: "0.78rem", fontWeight: 700, color: accent, textTransform: "uppercase", letterSpacing: "0.08em" }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+// ── Insights tab ──────────────────────────────────────────────────────────
+function InsightsTab({ issues }: { issues: Issue[] }) {
+  const active = useMemo(() => issues.filter(i => !isDone(i)), [issues]);
+  const total = active.length;
+
+  // --- Priority ---
+  const byPriority = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const i of active) counts[i.priority] = (counts[i.priority] ?? 0) + 1;
+    return ["urgent", "high", "medium", "low", "none"].map(p => ({ key: p, label: PRIORITY_META[p].label, count: counts[p] ?? 0, color: PRIORITY_META[p].color }));
+  }, [active]);
+
+  // --- State ---
+  const byState = useMemo(() => {
+    const counts = new Map<string, { count: number; color: string }>();
+    for (const i of active) {
+      const cur = counts.get(i.state_name) ?? { count: 0, color: i.state_color };
+      counts.set(i.state_name, { count: cur.count + 1, color: i.state_color });
+    }
+    return Array.from(counts.entries()).map(([name, { count, color }]) => ({ name, count, color })).sort((a, b) => b.count - a.count);
+  }, [active]);
+
+  // --- Cycle ---
+  const byCycle = useMemo(() => {
+    const counts = new Map<string, number>();
+    let noCycle = 0;
+    for (const i of active) {
+      if (i.cycle) counts.set(i.cycle, (counts.get(i.cycle) ?? 0) + 1);
+      else noCycle++;
+    }
+    const result = Array.from(counts.entries()).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+    if (noCycle > 0) result.push({ name: "No Cycle", count: noCycle });
+    return result;
+  }, [active]);
+
+  // --- Module ---
+  const byModule = useMemo(() => {
+    const counts = new Map<string, number>();
+    let noMod = 0;
+    for (const i of active) {
+      if (i.modules.length > 0) i.modules.forEach(m => counts.set(m, (counts.get(m) ?? 0) + 1));
+      else noMod++;
+    }
+    const result = Array.from(counts.entries()).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+    if (noMod > 0) result.push({ name: "No Module", count: noMod });
+    return result;
+  }, [active]);
+
+  // --- Tags (Bugs + Integrations only) ---
+  const byInsightTag = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const i of active) {
+      for (const label of i.labels) {
+        if (INSIGHT_TAGS.includes(label)) counts[label] = (counts[label] ?? 0) + 1;
+      }
+    }
+    return INSIGHT_TAGS.map(t => ({ name: t, count: counts[t] ?? 0 }));
+  }, [active]);
+
+  const CYCLE_COLORS = ["#a78bfa", "#818cf8", "#60a5fa", "#34d399", "#fbbf24", "#f87171"];
+  const MODULE_COLORS = ["#34d399", "#10b981", "#6ee7b7", "#a3e635", "#4ade80", "#22d3ee"];
+
+  const kpi: React.CSSProperties = {
+    background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12,
+    padding: "1rem 1.5rem", display: "flex", flexDirection: "column", gap: 4,
+  };
+
+  const overdue = issues.filter(i => !isDone(i) && overdueDays(i.due_date) !== null).length;
+  const anomaly = issues.filter(i => !isDone(i) && ANOMALY_TYPES.some(a => a.check(i))).length;
+  const unassigned = issues.filter(i => !isDone(i) && i.assignees.length === 0).length;
+  const noDate = issues.filter(i => !isDone(i) && !i.due_date).length;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      {/* KPI row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "1rem" }}>
+        {[
+          { label: "Active Issues", val: total, color: "#60a5fa" },
+          { label: "Overdue", val: overdue, color: "#ef4444" },
+          { label: "Anomalies", val: anomaly, color: "#f97316" },
+          { label: "Unassigned", val: unassigned, color: "#38bdf8" },
+          { label: "No Due Date", val: noDate, color: "#fbbf24" },
+        ].map(k => (
+          <div key={k.label} style={kpi}>
+            <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 600, letterSpacing: "0.05em" }}>{k.label}</span>
+            <span style={{ fontSize: "1.9rem", fontWeight: 800, color: k.color, lineHeight: 1 }}>{k.val}</span>
+            <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>{total > 0 ? ((k.val / total) * 100).toFixed(0) : 0}% of active</span>
+          </div>
+        ))}
+      </div>
+
+      {/* Priority + State side by side */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+        <InsightCard title="By Priority" accent="#f97316">
+          {byPriority.map(p => <InsightBar key={p.key} label={p.label} count={p.count} total={total} color={p.color} />)}
+        </InsightCard>
+        <InsightCard title="By State" accent="#60a5fa">
+          {byState.map(s => <InsightBar key={s.name} label={s.name} count={s.count} total={total} color={s.color} />)}
+        </InsightCard>
+      </div>
+
+      {/* Cycle + Module side by side */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+        <InsightCard title="By Cycle" accent="#a78bfa">
+          {byCycle.length === 0
+            ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No cycle data yet — loading…</span>
+            : byCycle.map((c, i) => <InsightBar key={c.name} label={c.name} count={c.count} total={total} color={c.name === "No Cycle" ? "#475569" : CYCLE_COLORS[i % CYCLE_COLORS.length]} />)
+          }
+        </InsightCard>
+        <InsightCard title="By Module" accent="#34d399">
+          {byModule.length === 0
+            ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No module data yet — loading…</span>
+            : byModule.map((m, i) => <InsightBar key={m.name} label={m.name} count={m.count} total={total} color={m.name === "No Module" ? "#475569" : MODULE_COLORS[i % MODULE_COLORS.length]} />)
+          }
+        </InsightCard>
+      </div>
+
+      {/* Tag insights */}
+      <InsightCard title={`Tags — Bugs & Integrations`} accent="#38bdf8">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
+          {byInsightTag.map(t => (
+            <div key={t.name} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "0.85rem 1rem", display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: "0.82rem", fontWeight: 700, color: t.name === "Bugs" ? "#ef4444" : "#38bdf8" }}>{t.name}</div>
+              <div style={{ fontSize: "2rem", fontWeight: 800, color: t.name === "Bugs" ? "#ef4444" : "#38bdf8", lineHeight: 1 }}>{t.count}</div>
+              <InsightBar label="" count={t.count} total={total} color={t.name === "Bugs" ? "#ef4444" : "#38bdf8"} />
+              <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>{total > 0 ? ((t.count / total) * 100).toFixed(1) : 0}% of active issues</div>
+            </div>
+          ))}
+        </div>
+      </InsightCard>
     </div>
   );
 }
@@ -288,8 +559,18 @@ function AnomalyTab({ issues }: { issues: Issue[] }) {
                       >
                         <td style={{ padding: "10px 14px", maxWidth: 260 }}>
                           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                            <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem", fontWeight: 600 }}>{issue.project_identifier}-{issue.sequence_id}</span>
-                            <span style={{ fontWeight: 500, lineHeight: 1.4 }}>{issue.name}</span>
+                            <a href={issueUrl(issue)} target="_blank" rel="noopener noreferrer"
+                              style={{ color: "var(--text-secondary)", fontSize: "0.72rem", fontWeight: 600, textDecoration: "none" }}
+                              onMouseEnter={e => (e.currentTarget.style.color = "#60a5fa")}
+                              onMouseLeave={e => (e.currentTarget.style.color = "var(--text-secondary)")}>
+                              {issue.project_identifier}-{issue.sequence_id}
+                            </a>
+                            <a href={issueUrl(issue)} target="_blank" rel="noopener noreferrer"
+                              style={{ fontWeight: 500, lineHeight: 1.4, color: "inherit", textDecoration: "none" }}
+                              onMouseEnter={e => (e.currentTarget.style.color = "#93c5fd")}
+                              onMouseLeave={e => (e.currentTarget.style.color = "inherit")}>
+                              {issue.name}
+                            </a>
                           </div>
                         </td>
                         <td style={{ padding: "10px 14px", minWidth: 200 }}>
@@ -324,7 +605,7 @@ function AnomalyTab({ issues }: { issues: Issue[] }) {
                         <td style={{ padding: "10px 14px", maxWidth: 180 }}>
                           {issue.modules.length === 0
                             ? <span style={{ color: "#34d399", fontWeight: 600 }}>Missing</span>
-                            : <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>{issue.modules.map(m => <Badge key={m} text={m} color="#34d399" bg="rgba(52,211,153,0.1)" />)}</div>}
+                            : <TagCell labels={issue.modules} color="#34d399" bg="rgba(52,211,153,0.1)" />}
                         </td>
                         <td style={{ padding: "10px 14px", whiteSpace: "nowrap", color: "var(--text-secondary)" }}>{issue.project_name}</td>
                       </tr>
@@ -352,9 +633,8 @@ export default function PlaneDashboard() {
   const [loading, setLoading] = useState(true);
   const [enriching, setEnriching] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"overall" | "overdue" | "anomaly">("overall");
+  const [activeTab, setActiveTab] = useState<"overall" | "overdue" | "anomaly" | "insights">("overall");
 
-  // Multi-select filter state
   const [fProjects,    setFProjects]    = useState<string[]>([]);
   const [fCreatedBys,  setFCreatedBys]  = useState<string[]>([]);
   const [fAssignees,   setFAssignees]   = useState<string[]>([]);
@@ -364,7 +644,6 @@ export default function PlaneDashboard() {
   const [fStates,      setFStates]      = useState<string[]>([]);
 
   useEffect(() => {
-    // Stage 1: fast load — basic data only
     fetch("/api/issues")
       .then(r => r.json())
       .then(data => {
@@ -373,34 +652,30 @@ export default function PlaneDashboard() {
         setFilterOptions(data.filters);
         setLoading(false);
 
-        // Stage 2: background enrich — cycle/module data
         setEnriching(true);
         return fetch("/api/issues?enrich=1")
           .then(r => r.json())
           .then(enriched => {
-            if (enriched.error) return; // silently ignore enrich errors
-            // Merge cycle/module fields into existing issues by id
+            if (enriched.error) return;
             const enrichMap = new Map(enriched.issues.map((i: Issue) => [i.id, i]));
             setIssues(prev => prev.map(issue => {
-              const e = enrichMap.get(issue.id);
+              const e = enrichMap.get(issue.id) as Issue | undefined;
               if (!e) return issue;
               return { ...issue, cycle: e.cycle, modules: e.modules };
             }));
-            // Update filter options with enriched cycles/modules
             setFilterOptions(prev => prev ? {
               ...prev,
               cycles: enriched.filters.cycles,
               modules: enriched.filters.modules,
             } : prev);
           })
-          .catch(() => {}) // silent
+          .catch(() => {})
           .finally(() => setEnriching(false));
       })
       .catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
   const hasFilters = fProjects.length || fCreatedBys.length || fAssignees.length || fModules.length || fCycles.length || fPriorities.length || fStates.length;
-
   const clearFilters = () => { setFProjects([]); setFCreatedBys([]); setFAssignees([]); setFModules([]); setFCycles([]); setFPriorities([]); setFStates([]); };
 
   const filtered = useMemo(() => {
@@ -423,10 +698,13 @@ export default function PlaneDashboard() {
   const anomalyCount = useMemo(() => issues.filter(i => !isDone(i) && ANOMALY_TYPES.some(a => a.check(i))).length, [issues]);
 
   const tabs = [
-    { key: "overall" as const, label: "Overall", count: issues.length },
-    { key: "overdue" as const, label: "Overdue", count: overdueCount },
-    { key: "anomaly" as const, label: "Anomaly", count: anomalyCount },
+    { key: "overall"  as const, label: "Overall",  count: issues.length },
+    { key: "overdue"  as const, label: "Overdue",  count: overdueCount },
+    { key: "anomaly"  as const, label: "Anomaly",  count: anomalyCount },
+    { key: "insights" as const, label: "Insights", count: null },
   ];
+
+  const showFilters = activeTab !== "anomaly" && activeTab !== "insights";
 
   return (
     <main style={{ padding: "2rem", minHeight: "100vh" }}>
@@ -445,13 +723,13 @@ export default function PlaneDashboard() {
         {tabs.map(tab => (
           <button key={tab.key} onClick={() => setActiveTab(tab.key)} style={{ padding: "8px 20px", background: "none", border: "none", borderBottom: activeTab === tab.key ? "2px solid #3b82f6" : "2px solid transparent", color: activeTab === tab.key ? "#3b82f6" : "var(--text-secondary)", fontWeight: activeTab === tab.key ? 700 : 400, fontSize: "0.9rem", cursor: "pointer", marginBottom: -1, display: "flex", alignItems: "center", gap: 6 }}>
             {tab.label}
-            {tab.count > 0 && <span style={{ background: activeTab === tab.key ? "rgba(59,130,246,0.2)" : "rgba(255,255,255,0.08)", color: activeTab === tab.key ? "#60a5fa" : "var(--text-secondary)", borderRadius: 9999, padding: "1px 8px", fontSize: "0.72rem", fontWeight: 700 }}>{tab.count}</span>}
+            {tab.count !== null && tab.count > 0 && <span style={{ background: activeTab === tab.key ? "rgba(59,130,246,0.2)" : "rgba(255,255,255,0.08)", color: activeTab === tab.key ? "#60a5fa" : "var(--text-secondary)", borderRadius: 9999, padding: "1px 8px", fontSize: "0.72rem", fontWeight: 700 }}>{tab.count}</span>}
           </button>
         ))}
       </div>
 
       {/* Filters */}
-      {activeTab !== "anomaly" && filterOptions && (
+      {showFilters && filterOptions && (
         <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "1.25rem 1.5rem", marginBottom: "1.5rem", display: "flex", flexWrap: "wrap", gap: "1.25rem", alignItems: "flex-end" }}>
           <MultiSelect label="Project"    selected={fProjects}   options={filterOptions.projects.map(p   => ({ value: p.id,   label: p.name }))} onChange={setFProjects} />
           <MultiSelect label="Created by" selected={fCreatedBys} options={filterOptions.members.map(m    => ({ value: m,      label: m }))}       onChange={setFCreatedBys} />
@@ -469,9 +747,10 @@ export default function PlaneDashboard() {
       )}
 
       {error && <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "1rem 1.5rem", color: "#ef4444", marginBottom: "1rem" }}>Error: {error}</div>}
-      {loading && <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "3rem", textAlign: "center", color: "var(--text-secondary)" }}>Loading issues from Plane...</div>}
+      {loading && <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "3rem", textAlign: "center", color: "var(--text-secondary)" }}>Loading issues from Plane…</div>}
 
-      {!loading && !error && activeTab === "anomaly" && <AnomalyTab issues={issues} />}
+      {!loading && !error && activeTab === "insights" && <InsightsTab issues={issues} />}
+      {!loading && !error && activeTab === "anomaly"  && <AnomalyTab issues={issues} />}
 
       {activeTab === "overdue" && !loading && (
         <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "0.75rem 1.25rem", marginBottom: "1rem", color: "#fca5a5", fontSize: "0.85rem" }}>
@@ -479,11 +758,11 @@ export default function PlaneDashboard() {
         </div>
       )}
 
-      {!loading && !error && activeTab !== "anomaly" && (
+      {!loading && !error && activeTab !== "anomaly" && activeTab !== "insights" && (
         <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, overflow: "hidden" }}>
           {filtered.length === 0
             ? <div style={{ padding: "3rem", textAlign: "center", color: "var(--text-secondary)" }}>No issues match the current filters.</div>
-            : <IssueTable issues={filtered} showOverdue={activeTab === "overdue"} />
+            : <IssueTable issues={filtered} allIssues={issues} showOverdue={activeTab === "overdue"} />
           }
           {filtered.length > 0 && (
             <div style={{ borderTop: "1px solid var(--border-glass)", padding: "10px 14px", color: "var(--text-secondary)", fontSize: "0.78rem" }}>

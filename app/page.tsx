@@ -350,6 +350,7 @@ export default function PlaneDashboard() {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [loading, setLoading] = useState(true);
+  const [enriching, setEnriching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overall" | "overdue" | "anomaly">("overall");
 
@@ -363,15 +364,39 @@ export default function PlaneDashboard() {
   const [fStates,      setFStates]      = useState<string[]>([]);
 
   useEffect(() => {
+    // Stage 1: fast load — basic data only
     fetch("/api/issues")
       .then(r => r.json())
       .then(data => {
         if (data.error) throw new Error(data.error);
         setIssues(data.issues);
         setFilterOptions(data.filters);
+        setLoading(false);
+
+        // Stage 2: background enrich — cycle/module data
+        setEnriching(true);
+        return fetch("/api/issues?enrich=1")
+          .then(r => r.json())
+          .then(enriched => {
+            if (enriched.error) return; // silently ignore enrich errors
+            // Merge cycle/module fields into existing issues by id
+            const enrichMap = new Map(enriched.issues.map((i: Issue) => [i.id, i]));
+            setIssues(prev => prev.map(issue => {
+              const e = enrichMap.get(issue.id);
+              if (!e) return issue;
+              return { ...issue, cycle: e.cycle, modules: e.modules };
+            }));
+            // Update filter options with enriched cycles/modules
+            setFilterOptions(prev => prev ? {
+              ...prev,
+              cycles: enriched.filters.cycles,
+              modules: enriched.filters.modules,
+            } : prev);
+          })
+          .catch(() => {}) // silent
+          .finally(() => setEnriching(false));
       })
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
+      .catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
   const hasFilters = fProjects.length || fCreatedBys.length || fAssignees.length || fModules.length || fCycles.length || fPriorities.length || fStates.length;
@@ -411,6 +436,7 @@ export default function PlaneDashboard() {
         </h1>
         <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem" }}>
           Workspace: cr-product &middot; {loading ? "Loading..." : `${issues.length} total issues`}
+          {enriching && <span style={{ marginLeft: 10, fontSize: "0.78rem", color: "#a78bfa" }}>↻ Loading cycle &amp; module data…</span>}
         </p>
       </div>
 

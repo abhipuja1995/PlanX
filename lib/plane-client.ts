@@ -13,7 +13,7 @@ export class PlaneClient {
       method,
       headers: { "X-API-Key": this.apiKey, "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined,
-      next: { revalidate: 60 },
+      next: { revalidate: 300 },
     } as RequestInit);
     if (!res.ok) throw new Error(`Plane API ${method} ${path} → ${res.status}`);
     if (res.status === 204) return null;

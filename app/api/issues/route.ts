@@ -4,34 +4,31 @@ import { PlaneClient } from "@/lib/plane-client";
 const WS = process.env.PLANE_WORKSPACE_SLUG!;
 const client = new PlaneClient(process.env.PLANE_API_KEY!, process.env.PLANE_BASE_URL!);
 
-function arr(data: any): any[] { return data?.results ?? data ?? []; }
+function arr(data: any): any[] { return data?.results ?? (Array.isArray(data) ? data : []); }
 function toMap<T>(items: T[], key: keyof T): Record<string, T> {
   return Object.fromEntries(items.map(i => [i[key], i]));
 }
 
-// Fetch with a timeout to avoid hanging
-async function safeFetch(fn: () => Promise<any>, fallback: any = []): Promise<any> {
-  try {
-    return await Promise.race([
-      fn(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 8000)),
-    ]);
-  } catch {
-    return fallback;
+// Process in batches to avoid overwhelming Plane API
+async function batchedMap<T, R>(items: T[], fn: (item: T) => Promise<R>, batchSize = 3): Promise<R[]> {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const batchResults = await Promise.allSettled(batch.map(fn));
+    results.push(...batchResults.map(r => r.status === "fulfilled" ? r.value : [] as any));
   }
+  return results;
 }
 
 export async function GET() {
   try {
     const projects: any[] = arr(await client.listProjects(WS));
 
-    // Process projects sequentially to avoid hammering Plane API
-    const enriched: any[][] = [];
-    for (const project of projects) {
+    // Fetch all projects in parallel
+    const enriched = await Promise.all(projects.map(async (project: any) => {
       const pid = project.id;
 
-      // Batch 1: issues + metadata in parallel
-      const [issues, states, labels, cycles, modules, members] = await Promise.all([
+      const [issues, states, labels, cycles, mods, members] = await Promise.all([
         client.listIssues(WS, pid).then(arr),
         client.listStates(WS, pid).then(arr),
         client.listLabels(WS, pid).then(arr),
@@ -40,70 +37,46 @@ export async function GET() {
         client.listProjectMembers(WS, pid).then(arr),
       ]);
 
-      const stateMap  = toMap(states, "id");
-      const labelMap  = toMap(labels, "id");
-      const cycleMap  = toMap(cycles, "id");
-      const moduleMap = toMap(modules, "id");
+      const stateMap  = toMap(states,  "id");
+      const labelMap  = toMap(labels,  "id");
+      const cycleMap  = toMap(cycles,  "id");
+      const moduleMap = toMap(mods,    "id");
       const memberMap = Object.fromEntries(
         members.map((m: any) => [m.member?.id ?? m.id, m.member ?? m])
       );
 
-      // Check if issues already carry cycle_id / module_ids inline (Plane v2+)
-      const sampleIssue = issues[0] ?? {};
-      const hasCycleInline  = "cycle_id"   in sampleIssue;
-      const hasModuleInline = "module_ids"  in sampleIssue;
-
+      // Fetch cycle-issues + module-issues in batches of 3 (not all at once)
       const issueCycle:   Record<string, string>   = {};
-      const issueModules: Record<string, string[]>  = {};
+      const issueModules: Record<string, string[]> = {};
 
-      if (hasCycleInline) {
-        // Use inline cycle_id
-        for (const issue of issues) {
-          if (issue.cycle_id && cycleMap[issue.cycle_id]) {
-            issueCycle[issue.id] = cycleMap[issue.cycle_id].name;
-          }
-        }
-      } else {
-        // Fetch cycle-issues sequentially (one at a time) to avoid 522s
-        for (const c of cycles) {
-          const items = arr(await safeFetch(() => client.listCycleIssues(WS, pid, c.id)));
-          for (const ci of items) {
-            const iid = ci.issue ?? ci.issue_id;
-            if (iid) issueCycle[iid] = cycleMap[c.id]?.name ?? c.id;
-          }
-        }
-      }
+      const cycleResults = await batchedMap(cycles, async (c: any) => {
+        const items = arr(await client.listCycleIssues(WS, pid, c.id).catch(() => []));
+        return items.map((ci: any) => ({ iid: ci.issue ?? ci.issue_id, name: cycleMap[c.id]?.name ?? c.id }));
+      });
+      for (const entries of cycleResults)
+        for (const { iid, name } of (entries as any[]))
+          if (iid) issueCycle[iid] = name;
 
-      if (hasModuleInline) {
-        // Use inline module_ids
-        for (const issue of issues) {
-          if (Array.isArray(issue.module_ids) && issue.module_ids.length > 0) {
-            issueModules[issue.id] = issue.module_ids
-              .map((mid: string) => moduleMap[mid]?.name ?? mid)
-              .filter(Boolean);
-          }
+      const modResults = await batchedMap(mods, async (m: any) => {
+        const items = arr(await client.listModuleIssues(WS, pid, m.id).catch(() => []));
+        return items.map((mi: any) => ({ iid: mi.issue ?? mi.issue_id, name: moduleMap[m.id]?.name ?? m.id }));
+      });
+      for (const entries of modResults)
+        for (const { iid, name } of (entries as any[])) {
+          if (!iid) continue;
+          issueModules[iid] ??= [];
+          if (!issueModules[iid].includes(name)) issueModules[iid].push(name);
         }
-      } else {
-        // Fetch module-issues sequentially
-        for (const m of modules) {
-          const items = arr(await safeFetch(() => client.listModuleIssues(WS, pid, m.id)));
-          for (const mi of items) {
-            const iid = mi.issue ?? mi.issue_id;
-            if (!iid) continue;
-            issueModules[iid] ??= [];
-            const name = moduleMap[m.id]?.name ?? m.id;
-            if (!issueModules[iid].includes(name)) issueModules[iid].push(name);
-          }
-        }
-      }
 
       function resolveMember(id: string) {
         const m = memberMap[id];
         return m ? `${m.display_name ?? m.first_name ?? ""} ${m.last_name ?? ""}`.trim() : (id ?? "");
       }
 
-      enriched.push(issues.map((issue: any) => {
+      return issues.map((issue: any) => {
         const state = stateMap[issue.state];
+        // Plane returns labels as UUID array in `labels` field (not label_ids)
+        const labelIds: string[] = issue.labels ?? issue.label_ids ?? [];
         return {
           id: issue.id,
           sequence_id: issue.sequence_id,
@@ -118,16 +91,16 @@ export async function GET() {
           created_by_id: issue.created_by,
           created_at: issue.created_at,
           start_date: issue.start_date ?? null,
-          due_date: issue.target_date ?? null,
-          labels: (issue.label_ids ?? []).map((lid: string) => labelMap[lid]?.name ?? lid),
+          due_date: issue.target_date ?? null,         // Plane uses target_date
+          labels: labelIds.map((lid: string) => labelMap[lid]?.name).filter(Boolean),
           cycle: issueCycle[issue.id] ?? null,
           modules: issueModules[issue.id] ?? [],
           project_id: pid,
           project_name: project.name,
           project_identifier: project.identifier,
         };
-      }));
-    }
+      });
+    }));
 
     const allIssues = enriched.flat();
 
@@ -146,18 +119,26 @@ export async function GET() {
       i.labels.forEach((l: string) => labelSet.add(l));
     }
 
-    return NextResponse.json({
-      issues: allIssues,
-      filters: {
-        projects: projects.map((p: any) => ({ id: p.id, name: p.name })),
-        members: Array.from(memberSet.keys()),
-        states: Array.from(stateSet.entries()).map(([id, name]) => ({ id, name })),
-        priorities: ["urgent", "high", "medium", "low", "none"],
-        cycles: Array.from(cycleSet),
-        modules: Array.from(moduleSet),
-        labels: Array.from(labelSet),
+    return NextResponse.json(
+      {
+        issues: allIssues,
+        filters: {
+          projects: projects.map((p: any) => ({ id: p.id, name: p.name })),
+          members: Array.from(memberSet.keys()),
+          states: Array.from(stateSet.entries()).map(([id, name]) => ({ id, name })),
+          priorities: ["urgent", "high", "medium", "low", "none"],
+          cycles: Array.from(cycleSet),
+          modules: Array.from(moduleSet),
+          labels: Array.from(labelSet),
+        },
       },
-    });
+      {
+        headers: {
+          // Cache for 5 minutes at CDN/edge level
+          "Cache-Control": "s-maxage=300, stale-while-revalidate=60",
+        },
+      }
+    );
   } catch (err: any) {
     console.error("Plane API error:", err);
     return NextResponse.json({ error: err.message }, { status: 500 });

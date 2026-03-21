@@ -1011,8 +1011,10 @@ export default function PlaneDashboard() {
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [loading, setLoading] = useState(true);
   const [enriching, setEnriching] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overall" | "overdue" | "anomaly" | "insights">("overall");
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const [fProjects,    setFProjects]    = useState<string[]>([]);
   const [fCreatedBys,  setFCreatedBys]  = useState<string[]>([]);
@@ -1024,14 +1026,19 @@ export default function PlaneDashboard() {
   const [fDateFrom,    setFDateFrom]    = useState<string>("");
   const [fDateTo,      setFDateTo]      = useState<string>("");
 
-  useEffect(() => {
-    fetch("/api/issues")
+  const loadData = (isRefresh = false) => {
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
+    setError(null);
+    return fetch("/api/issues")
       .then(r => r.json())
       .then(data => {
         if (data.error) throw new Error(data.error);
         setIssues(data.issues);
         setFilterOptions(data.filters);
         setLoading(false);
+        setRefreshing(false);
+        setLastUpdated(new Date());
 
         setEnriching(true);
         return fetch("/api/issues?enrich=1")
@@ -1049,11 +1056,19 @@ export default function PlaneDashboard() {
               cycles: enriched.filters.cycles,
               modules: enriched.filters.modules,
             } : prev);
+            setLastUpdated(new Date());
           })
           .catch(() => {})
           .finally(() => setEnriching(false));
       })
-      .catch(e => { setError(e.message); setLoading(false); });
+      .catch(e => { setError(e.message); setLoading(false); setRefreshing(false); });
+  };
+
+  useEffect(() => {
+    loadData();
+    const interval = setInterval(() => loadData(true), 30 * 60 * 1000);
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const hasFilters = fProjects.length || fCreatedBys.length || fAssignees.length || fModules.length || fCycles.length || fPriorities.length || fStates.length || fDateFrom || fDateTo;
@@ -1095,10 +1110,26 @@ export default function PlaneDashboard() {
         <h1 style={{ fontSize: "1.8rem", fontWeight: 800, background: "linear-gradient(to right, #60a5fa, #c084fc)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text", marginBottom: 4 }}>
           Nirmaan
         </h1>
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem" }}>
-          Workspace: cr-product &middot; {loading ? "Loading..." : `${issues.length} total issues`}
-          {enriching && <span style={{ marginLeft: 10, fontSize: "0.78rem", color: "#a78bfa" }}>↻ Loading cycle &amp; module data…</span>}
-        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem", margin: 0 }}>
+            Workspace: cr-product &middot; {loading ? "Loading..." : `${issues.length} total issues`}
+            {enriching && <span style={{ marginLeft: 10, fontSize: "0.78rem", color: "#a78bfa" }}>↻ Loading cycle &amp; module data…</span>}
+          </p>
+          {lastUpdated && (
+            <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)", opacity: 0.7 }}>
+              Last updated {lastUpdated.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
+          <button
+            onClick={() => loadData(true)}
+            disabled={loading || refreshing}
+            style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 12px", background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.25)", borderRadius: 8, color: "#60a5fa", fontSize: "0.78rem", fontWeight: 600, cursor: loading || refreshing ? "not-allowed" : "pointer", opacity: loading || refreshing ? 0.5 : 1 }}
+          >
+            <span style={{ display: "inline-block", animation: refreshing ? "spin 1s linear infinite" : "none" }}>↻</span>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+          <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+        </div>
       </div>
 
       {/* Tabs */}

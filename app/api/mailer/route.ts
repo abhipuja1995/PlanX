@@ -213,13 +213,15 @@ export async function GET(req: Request) {
       for (const [, { email, name, issues }] of Object.entries(overdueByAssignee)) {
         const sorted = [...issues].sort((a, b) => b._days - a._days);
         const rows = sorted.map(i => overdueRow(i, i._days)).join("");
+        const urgentCount = issues.filter(i => (i.priority === "urgent" || i.priority === "high")).length;
+        const urgentNote = urgentCount > 0 ? `, including ${urgentCount} high-priority` : "";
         await transporter.sendMail({
           from,
           to: email,
-          subject: `⚠️ ${issues.length} Overdue Issue${issues.length !== 1 ? "s" : ""} Need Your Action — ${dateStr}`,
+          subject: `🚨 Action Required: ${issues.length} Overdue Issue${issues.length !== 1 ? "s" : ""} Assigned to You${urgentCount > 0 ? ` (${urgentCount} High Priority)` : ""} — ${dateStr}`,
           html: buildHtml({
             recipientName: name,
-            introText: `You have <strong>${issues.length} overdue issue${issues.length !== 1 ? "s" : ""}</strong> assigned to you. Please review and update their status today.`,
+            introText: `You have <strong style="color:#ef4444">${issues.length} overdue issue${issues.length !== 1 ? "s" : ""}</strong> assigned to you${urgentNote}. These are past their due date and require immediate attention. Please update their status or reach out to your PM today.`,
             columns: ["Issue", "State", "Priority", "Due Date", "Project"],
             rows,
           }),
@@ -230,13 +232,19 @@ export async function GET(req: Request) {
       // Anomaly emails
       for (const [, { email, name, issues }] of Object.entries(anomalyByCreator)) {
         const rows = issues.map(i => anomalyRow(i)).join("");
+        const missingDue   = issues.filter(i => i.anomalies.includes("No Due Date")).length;
+        const unassigned   = issues.filter(i => i.anomalies.includes("Unassigned")).length;
+        const parts: string[] = [];
+        if (missingDue)  parts.push(`${missingDue} without a due date`);
+        if (unassigned)  parts.push(`${unassigned} unassigned`);
+        const detail = parts.length ? ` (${parts.join(", ")})` : "";
         await transporter.sendMail({
           from,
           to: email,
-          subject: `🔍 ${issues.length} Issue${issues.length !== 1 ? "s" : ""} Need Correction — ${dateStr}`,
+          subject: `⚠️ Escalation: ${issues.length} Issue${issues.length !== 1 ? "s" : ""} You Created Have Incomplete Data${detail ? " — Fix Needed" : ""} — ${dateStr}`,
           html: buildHtml({
             recipientName: name,
-            introText: `You created ${issues.length} issue${issues.length !== 1 ? "s" : ""} with missing required fields. Please fill them in so they can be tracked properly.`,
+            introText: `<strong style="color:#f97316">${issues.length} issue${issues.length !== 1 ? "s" : ""} you created${detail}</strong> are missing required fields. Incomplete issues cannot be tracked, reported, or acted upon. Please update them immediately so the team can plan and deliver effectively.`,
             columns: ["Issue", "State", "Missing Fields", "Due Date", "Project"],
             rows,
           }),

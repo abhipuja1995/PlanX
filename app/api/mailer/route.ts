@@ -32,6 +32,7 @@ const PRIORITY_COLOR: Record<string, string> = {
 function buildHtml(opts: {
   recipientName: string;
   introText: string;
+  bulletList: string;
   columns: string[];
   rows: string;
 }): string {
@@ -56,8 +57,14 @@ function buildHtml(opts: {
   <!-- Body -->
   <tr><td style="background:#ffffff;padding:28px 32px">
     <p style="margin:0 0 8px;font-size:15px;color:#0f172a">Hi <strong>${opts.recipientName}</strong>,</p>
-    <p style="margin:0 0 24px;font-size:14px;color:#475569;line-height:1.6">${opts.introText}</p>
+    <p style="margin:0 0 20px;font-size:14px;color:#475569;line-height:1.6">${opts.introText}</p>
 
+    <!-- Quick issue list -->
+    <ul style="margin:0 0 24px;padding-left:18px;list-style:disc">
+      ${opts.bulletList}
+    </ul>
+
+    <!-- Detail table -->
     <div style="overflow-x:auto;border:1px solid #e2e8f0;border-radius:8px">
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;min-width:560px">
       <thead><tr style="background:#f8fafc">${headers}</tr></thead>
@@ -79,13 +86,23 @@ function buildHtml(opts: {
 </body></html>`;
 }
 
+function issueBulletList(issues: any[], getDetail: (i: any) => string): string {
+  return issues.map(i =>
+    `<li style="margin:6px 0;font-size:13px;color:#1e293b;line-height:1.5">
+      <a href="${issueUrl(i.project_id, i.id)}" style="color:#3b82f6;font-weight:700;text-decoration:none;font-family:monospace;font-size:12px">${i.project_identifier}-${i.sequence_id}</a>
+      &nbsp;<a href="${issueUrl(i.project_id, i.id)}" style="color:#0f172a;font-weight:600;text-decoration:none">${i.name}</a>
+      <span style="color:#64748b;font-size:12px"> — ${getDetail(i)}</span>
+    </li>`
+  ).join("");
+}
+
 function overdueRow(i: any, days: number): string {
   const p = i.priority ?? "none";
   const tdStyle = "padding:10px 14px;vertical-align:middle;border-bottom:1px solid #f1f5f9";
   return `<tr>
     <td style="${tdStyle}">
       <a href="${issueUrl(i.project_id, i.id)}" style="color:#3b82f6;font-weight:700;font-size:11px;text-decoration:none;font-family:monospace">${i.project_identifier}-${i.sequence_id}</a>
-      <div style="font-size:13px;color:#0f172a;margin-top:2px">${i.name}</div>
+      <div style="margin-top:2px"><a href="${issueUrl(i.project_id, i.id)}" style="color:#0f172a;font-size:13px;font-weight:600;text-decoration:none">${i.name}</a></div>
     </td>
     <td style="${tdStyle};color:#475569;white-space:nowrap">${i.state_name}</td>
     <td style="${tdStyle};white-space:nowrap"><span style="color:${PRIORITY_COLOR[p]};font-weight:700;text-transform:capitalize">${p}</span></td>
@@ -102,7 +119,7 @@ function anomalyRow(i: any): string {
   return `<tr>
     <td style="${tdStyle}">
       <a href="${issueUrl(i.project_id, i.id)}" style="color:#3b82f6;font-weight:700;font-size:11px;text-decoration:none;font-family:monospace">${i.project_identifier}-${i.sequence_id}</a>
-      <div style="font-size:13px;color:#0f172a;margin-top:2px">${i.name}</div>
+      <div style="margin-top:2px"><a href="${issueUrl(i.project_id, i.id)}" style="color:#0f172a;font-size:13px;font-weight:600;text-decoration:none">${i.name}</a></div>
     </td>
     <td style="${tdStyle};color:#475569;white-space:nowrap">${i.state_name}</td>
     <td style="${tdStyle}">${anomalyBadges}</td>
@@ -118,7 +135,8 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const dryRun = searchParams.get("dry") === "1";
+  const dryRun  = searchParams.get("dry") === "1";
+  const testTo  = searchParams.get("test_to") ?? null; // redirect ALL emails here when set
 
   try {
     // ── 1. Resolve workspace member emails ────────────────────────────────
@@ -213,43 +231,49 @@ export async function GET(req: Request) {
       for (const [, { email, name, issues }] of Object.entries(overdueByAssignee)) {
         const sorted = [...issues].sort((a, b) => b._days - a._days);
         const rows = sorted.map(i => overdueRow(i, i._days)).join("");
+        const bulletList = issueBulletList(sorted, i => `${i.state_name} · ${i._days}d overdue · ${i.project_name}`);
         const urgentCount = issues.filter(i => (i.priority === "urgent" || i.priority === "high")).length;
         const urgentNote = urgentCount > 0 ? `, including ${urgentCount} high-priority` : "";
+        const recipient = testTo ? `${testTo} [test — actual: ${email}]` : email;
         await transporter.sendMail({
           from,
-          to: email,
+          to: testTo ?? email,
           subject: `🚨 Action Required: ${issues.length} Overdue Issue${issues.length !== 1 ? "s" : ""} Assigned to You${urgentCount > 0 ? ` (${urgentCount} High Priority)` : ""} — ${dateStr}`,
           html: buildHtml({
-            recipientName: name,
+            recipientName: testTo ? `${name} (test mode)` : name,
             introText: `You have <strong style="color:#ef4444">${issues.length} overdue issue${issues.length !== 1 ? "s" : ""}</strong> assigned to you${urgentNote}. These are past their due date and require immediate attention. Please update their status or reach out to your PM today.`,
+            bulletList,
             columns: ["Issue", "State", "Priority", "Due Date", "Project"],
             rows,
           }),
         });
-        sent.push(`overdue → ${email} (${issues.length} issues)`);
+        sent.push(`overdue → ${recipient} (${issues.length} issues)`);
       }
 
       // Anomaly emails
       for (const [, { email, name, issues }] of Object.entries(anomalyByCreator)) {
         const rows = issues.map(i => anomalyRow(i)).join("");
+        const bulletList = issueBulletList(issues, i => i.anomalies.join(", "));
         const missingDue   = issues.filter(i => i.anomalies.includes("No Due Date")).length;
         const unassigned   = issues.filter(i => i.anomalies.includes("Unassigned")).length;
         const parts: string[] = [];
         if (missingDue)  parts.push(`${missingDue} without a due date`);
         if (unassigned)  parts.push(`${unassigned} unassigned`);
         const detail = parts.length ? ` (${parts.join(", ")})` : "";
+        const recipient = testTo ? `${testTo} [test — actual: ${email}]` : email;
         await transporter.sendMail({
           from,
-          to: email,
+          to: testTo ?? email,
           subject: `⚠️ Escalation: ${issues.length} Issue${issues.length !== 1 ? "s" : ""} You Created Have Incomplete Data${detail ? " — Fix Needed" : ""} — ${dateStr}`,
           html: buildHtml({
-            recipientName: name,
+            recipientName: testTo ? `${name} (test mode)` : name,
             introText: `<strong style="color:#f97316">${issues.length} issue${issues.length !== 1 ? "s" : ""} you created${detail}</strong> are missing required fields. Incomplete issues cannot be tracked, reported, or acted upon. Please update them immediately so the team can plan and deliver effectively.`,
+            bulletList,
             columns: ["Issue", "State", "Missing Fields", "Due Date", "Project"],
             rows,
           }),
         });
-        sent.push(`anomaly → ${email} (${issues.length} issues)`);
+        sent.push(`anomaly → ${recipient} (${issues.length} issues)`);
       }
     } else {
       // Dry run — return what would be sent

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 
 interface Issue {
   id: string;
@@ -9,6 +9,7 @@ interface Issue {
   priority: string;
   state_name: string;
   state_color: string;
+  state_group: string;
   assignees: string[];
   created_by: string;
   created_by_id: string;
@@ -30,6 +31,7 @@ interface FilterOptions {
   priorities: string[];
   cycles: string[];
   modules: string[];
+  labels: string[];
 }
 
 const PRIORITY_META: Record<string, { label: string; color: string; bg: string }> = {
@@ -41,12 +43,16 @@ const PRIORITY_META: Record<string, { label: string; color: string; bg: string }
 };
 
 const ANOMALY_TYPES = [
-  { key: "no_start_date",  label: "No Start Date",  color: "#f97316", check: (i: Issue) => !i.start_date },
-  { key: "no_due_date",    label: "No Due Date",    color: "#ef4444", check: (i: Issue) => !i.due_date },
-  { key: "no_cycle",       label: "No Cycle",       color: "#a78bfa", check: (i: Issue) => !i.cycle },
-  { key: "no_module",      label: "No Module",      color: "#34d399", check: (i: Issue) => i.modules.length === 0 },
-  { key: "unassigned",     label: "Unassigned",     color: "#38bdf8", check: (i: Issue) => i.assignees.length === 0 },
+  { key: "no_start_date", label: "No Start Date", color: "#f97316", check: (i: Issue) => !i.start_date },
+  { key: "no_due_date",   label: "No Due Date",   color: "#ef4444", check: (i: Issue) => !i.due_date },
+  { key: "no_cycle",      label: "No Cycle",      color: "#a78bfa", check: (i: Issue) => !i.cycle },
+  { key: "no_module",     label: "No Module",     color: "#34d399", check: (i: Issue) => i.modules.length === 0 },
+  { key: "unassigned",    label: "Unassigned",    color: "#38bdf8", check: (i: Issue) => i.assignees.length === 0 },
 ];
+
+function isDone(issue: Issue) {
+  return issue.state_group === "completed" || issue.state_name.toLowerCase() === "done";
+}
 
 function overdueDays(dueDate: string | null): number | null {
   if (!dueDate) return null;
@@ -71,25 +77,68 @@ function Badge({ text, color, bg }: { text: string; color: string; bg: string })
   );
 }
 
-function FilterSelect({ label, value, options, onChange }: {
-  label: string; value: string;
+// ── Multi-select dropdown ─────────────────────────────────────────────────
+function MultiSelect({ label, selected, options, onChange }: {
+  label: string;
+  selected: string[];
   options: { value: string; label: string }[];
-  onChange: (v: string) => void;
+  onChange: (v: string[]) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const toggle = (v: string) => {
+    onChange(selected.includes(v) ? selected.filter(x => x !== v) : [...selected, v]);
+  };
+
+  const displayLabel = selected.length === 0 ? "All" : selected.length === 1
+    ? (options.find(o => o.value === selected[0])?.label ?? selected[0])
+    : `${selected.length} selected`;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 140 }}>
+    <div ref={ref} style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 140, position: "relative" }}>
       <label style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>{label}</label>
-      <select value={value} onChange={e => onChange(e.target.value)} style={{ background: "rgba(15,23,42,0.8)", border: "1px solid var(--border-glass)", color: "var(--text-primary)", padding: "6px 10px", borderRadius: 8, fontSize: "0.82rem", outline: "none", cursor: "pointer" }}>
-        <option value="">All</option>
-        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{ background: "rgba(15,23,42,0.8)", border: "1px solid var(--border-glass)", color: selected.length > 0 ? "var(--text-primary)" : "var(--text-secondary)", padding: "6px 10px", borderRadius: 8, fontSize: "0.82rem", outline: "none", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayLabel}</span>
+        <span style={{ fontSize: "0.6rem", opacity: 0.6 }}>▼</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, zIndex: 100, background: "#1e293b", border: "1px solid var(--border-glass)", borderRadius: 8, minWidth: "100%", maxHeight: 220, overflowY: "auto", marginTop: 4, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+          {selected.length > 0 && (
+            <button onClick={() => onChange([])} style={{ width: "100%", padding: "6px 12px", background: "none", border: "none", borderBottom: "1px solid var(--border-glass)", color: "#ef4444", fontSize: "0.78rem", cursor: "pointer", textAlign: "left" }}>
+              Clear
+            </button>
+          )}
+          {options.map(o => (
+            <label key={o.value} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", cursor: "pointer", fontSize: "0.82rem", color: "var(--text-primary)" }}
+              onMouseEnter={e => (e.currentTarget.style.background = "rgba(59,130,246,0.1)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+            >
+              <input type="checkbox" checked={selected.includes(o.value)} onChange={() => toggle(o.value)}
+                style={{ accentColor: "#3b82f6", width: 14, height: 14, cursor: "pointer", flexShrink: 0 }} />
+              {o.label}
+            </label>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function IssueTable({ issues, activeTab }: { issues: Issue[]; activeTab: string }) {
+// ── Issue table ───────────────────────────────────────────────────────────
+function IssueTable({ issues, showOverdue }: { issues: Issue[]; showOverdue: boolean }) {
   const th: React.CSSProperties = { padding: "10px 14px", textAlign: "left", color: "var(--text-secondary)", fontWeight: 600, fontSize: "0.72rem", textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap" };
-
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
@@ -103,7 +152,7 @@ function IssueTable({ issues, activeTab }: { issues: Issue[]; activeTab: string 
             <th style={th}>Created</th>
             <th style={th}>Start Date</th>
             <th style={th}>Due Date</th>
-            {activeTab === "overdue" && <th style={th}>Overdue</th>}
+            {showOverdue && <th style={th}>Overdue</th>}
             <th style={th}>Cycle</th>
             <th style={th}>Tags</th>
             <th style={th}>Modules</th>
@@ -146,7 +195,7 @@ function IssueTable({ issues, activeTab }: { issues: Issue[]; activeTab: string 
                 <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
                   <span style={{ color: days ? "#ef4444" : "var(--text-secondary)", fontWeight: days ? 600 : 400 }}>{fmt(issue.due_date)}</span>
                 </td>
-                {activeTab === "overdue" && (
+                {showOverdue && (
                   <td style={{ padding: "10px 14px" }}>
                     {days !== null ? <span style={{ background: "rgba(239,68,68,0.15)", color: "#f87171", padding: "3px 10px", borderRadius: 9999, fontSize: "0.78rem", fontWeight: 700 }}>{days}d overdue</span> : "—"}
                   </td>
@@ -172,42 +221,37 @@ function IssueTable({ issues, activeTab }: { issues: Issue[]; activeTab: string 
   );
 }
 
+// ── Anomaly tab ───────────────────────────────────────────────────────────
 function AnomalyTab({ issues }: { issues: Issue[] }) {
-  const [activeAnomaly, setActiveAnomaly] = useState<string>("all");
+  const [activeAnomaly, setActiveAnomaly] = useState("all");
+  const nonDone = useMemo(() => issues.filter(i => !isDone(i)), [issues]);
 
   const anomalyCounts = useMemo(() =>
-    Object.fromEntries(ANOMALY_TYPES.map(a => [a.key, issues.filter(a.check).length])),
-    [issues]
+    Object.fromEntries(ANOMALY_TYPES.map(a => [a.key, nonDone.filter(a.check).length])),
+    [nonDone]
   );
 
-  // Each issue gets a list of its anomalies
   const issuesWithAnomalies = useMemo(() =>
-    issues
-      .map(i => ({ ...i, anomalies: ANOMALY_TYPES.filter(a => a.check(i)).map(a => a.key) }))
-      .filter(i => i.anomalies.length > 0),
-    [issues]
+    nonDone.map(i => ({ ...i, anomalies: ANOMALY_TYPES.filter(a => a.check(i)).map(a => a.key) }))
+           .filter(i => i.anomalies.length > 0),
+    [nonDone]
   );
 
-  const filtered = useMemo(() => {
-    if (activeAnomaly === "all") return issuesWithAnomalies;
-    return issuesWithAnomalies.filter(i => i.anomalies.includes(activeAnomaly));
-  }, [issuesWithAnomalies, activeAnomaly]);
+  const filtered = useMemo(() =>
+    activeAnomaly === "all" ? issuesWithAnomalies : issuesWithAnomalies.filter(i => i.anomalies.includes(activeAnomaly)),
+    [issuesWithAnomalies, activeAnomaly]
+  );
 
   const th: React.CSSProperties = { padding: "10px 14px", textAlign: "left", color: "var(--text-secondary)", fontWeight: 600, fontSize: "0.72rem", textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap" };
 
   return (
     <div>
-      {/* Anomaly type pills */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: "1.25rem" }}>
-        <button
-          onClick={() => setActiveAnomaly("all")}
-          style={{ padding: "6px 14px", borderRadius: 9999, border: "1px solid", borderColor: activeAnomaly === "all" ? "#3b82f6" : "var(--border-glass)", background: activeAnomaly === "all" ? "rgba(59,130,246,0.15)" : "transparent", color: activeAnomaly === "all" ? "#60a5fa" : "var(--text-secondary)", fontSize: "0.82rem", fontWeight: 600, cursor: "pointer" }}>
-          All issues with anomalies ({issuesWithAnomalies.length})
+        <button onClick={() => setActiveAnomaly("all")} style={{ padding: "6px 14px", borderRadius: 9999, border: `1px solid ${activeAnomaly === "all" ? "#3b82f6" : "var(--border-glass)"}`, background: activeAnomaly === "all" ? "rgba(59,130,246,0.15)" : "transparent", color: activeAnomaly === "all" ? "#60a5fa" : "var(--text-secondary)", fontSize: "0.82rem", fontWeight: 600, cursor: "pointer" }}>
+          All anomalies ({issuesWithAnomalies.length})
         </button>
         {ANOMALY_TYPES.map(a => (
-          <button key={a.key}
-            onClick={() => setActiveAnomaly(a.key)}
-            style={{ padding: "6px 14px", borderRadius: 9999, border: "1px solid", borderColor: activeAnomaly === a.key ? a.color : "var(--border-glass)", background: activeAnomaly === a.key ? `${a.color}22` : "transparent", color: activeAnomaly === a.key ? a.color : "var(--text-secondary)", fontSize: "0.82rem", fontWeight: 600, cursor: "pointer" }}>
+          <button key={a.key} onClick={() => setActiveAnomaly(a.key)} style={{ padding: "6px 14px", borderRadius: 9999, border: `1px solid ${activeAnomaly === a.key ? a.color : "var(--border-glass)"}`, background: activeAnomaly === a.key ? `${a.color}22` : "transparent", color: activeAnomaly === a.key ? a.color : "var(--text-secondary)", fontSize: "0.82rem", fontWeight: 600, cursor: "pointer" }}>
             {a.label} ({anomalyCounts[a.key]})
           </button>
         ))}
@@ -293,7 +337,7 @@ function AnomalyTab({ issues }: { issues: Issue[] }) {
         }
         {filtered.length > 0 && (
           <div style={{ borderTop: "1px solid var(--border-glass)", padding: "10px 14px", color: "var(--text-secondary)", fontSize: "0.78rem" }}>
-            Showing {filtered.length} issue{filtered.length !== 1 ? "s" : ""} with anomalies
+            Showing {filtered.length} issue{filtered.length !== 1 ? "s" : ""} with anomalies (Done excluded)
           </div>
         )}
       </div>
@@ -301,6 +345,7 @@ function AnomalyTab({ issues }: { issues: Issue[] }) {
   );
 }
 
+// ── Main page ─────────────────────────────────────────────────────────────
 export default function PlaneDashboard() {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
@@ -308,13 +353,14 @@ export default function PlaneDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"overall" | "overdue" | "anomaly">("overall");
 
-  const [fProject, setFProject] = useState("");
-  const [fCreatedBy, setFCreatedBy] = useState("");
-  const [fAssignee, setFAssignee] = useState("");
-  const [fModule, setFModule] = useState("");
-  const [fCycle, setFCycle] = useState("");
-  const [fPriority, setFPriority] = useState("");
-  const [fState, setFState] = useState("");
+  // Multi-select filter state
+  const [fProjects,    setFProjects]    = useState<string[]>([]);
+  const [fCreatedBys,  setFCreatedBys]  = useState<string[]>([]);
+  const [fAssignees,   setFAssignees]   = useState<string[]>([]);
+  const [fModules,     setFModules]     = useState<string[]>([]);
+  const [fCycles,      setFCycles]      = useState<string[]>([]);
+  const [fPriorities,  setFPriorities]  = useState<string[]>([]);
+  const [fStates,      setFStates]      = useState<string[]>([]);
 
   useEffect(() => {
     fetch("/api/issues")
@@ -328,31 +374,33 @@ export default function PlaneDashboard() {
       .finally(() => setLoading(false));
   }, []);
 
-  const hasFilters = fProject || fCreatedBy || fAssignee || fModule || fCycle || fPriority || fState;
+  const hasFilters = fProjects.length || fCreatedBys.length || fAssignees.length || fModules.length || fCycles.length || fPriorities.length || fStates.length;
+
+  const clearFilters = () => { setFProjects([]); setFCreatedBys([]); setFAssignees([]); setFModules([]); setFCycles([]); setFPriorities([]); setFStates([]); };
 
   const filtered = useMemo(() => {
     let list = issues;
-    if (fProject)   list = list.filter(i => i.project_id === fProject);
-    if (fCreatedBy) list = list.filter(i => i.created_by === fCreatedBy);
-    if (fAssignee)  list = list.filter(i => i.assignees.includes(fAssignee));
-    if (fModule)    list = list.filter(i => i.modules.includes(fModule));
-    if (fCycle)     list = list.filter(i => i.cycle === fCycle);
-    if (fPriority)  list = list.filter(i => i.priority === fPriority);
-    if (fState)     list = list.filter(i => i.state_name === fState);
+    if (fProjects.length)   list = list.filter(i => fProjects.includes(i.project_id));
+    if (fCreatedBys.length) list = list.filter(i => fCreatedBys.includes(i.created_by));
+    if (fAssignees.length)  list = list.filter(i => i.assignees.some(a => fAssignees.includes(a)));
+    if (fModules.length)    list = list.filter(i => i.modules.some(m => fModules.includes(m)));
+    if (fCycles.length)     list = list.filter(i => i.cycle && fCycles.includes(i.cycle));
+    if (fPriorities.length) list = list.filter(i => fPriorities.includes(i.priority));
+    if (fStates.length)     list = list.filter(i => fStates.includes(i.state_name));
     if (activeTab === "overdue") {
-      list = list.filter(i => overdueDays(i.due_date) !== null);
+      list = list.filter(i => !isDone(i) && overdueDays(i.due_date) !== null);
       list = [...list].sort((a, b) => (overdueDays(b.due_date) ?? 0) - (overdueDays(a.due_date) ?? 0));
     }
     return list;
-  }, [issues, fProject, fCreatedBy, fAssignee, fModule, fCycle, fPriority, fState, activeTab]);
+  }, [issues, fProjects, fCreatedBys, fAssignees, fModules, fCycles, fPriorities, fStates, activeTab]);
 
-  const overdueCount = useMemo(() => issues.filter(i => overdueDays(i.due_date) !== null).length, [issues]);
-  const anomalyCount = useMemo(() => issues.filter(i => ANOMALY_TYPES.some(a => a.check(i))).length, [issues]);
+  const overdueCount = useMemo(() => issues.filter(i => !isDone(i) && overdueDays(i.due_date) !== null).length, [issues]);
+  const anomalyCount = useMemo(() => issues.filter(i => !isDone(i) && ANOMALY_TYPES.some(a => a.check(i))).length, [issues]);
 
   const tabs = [
-    { key: "overall" as const,  label: "Overall",  count: issues.length },
-    { key: "overdue" as const,  label: "Overdue",  count: overdueCount },
-    { key: "anomaly" as const,  label: "Anomaly",  count: anomalyCount },
+    { key: "overall" as const, label: "Overall", count: issues.length },
+    { key: "overdue" as const, label: "Overdue", count: overdueCount },
+    { key: "anomaly" as const, label: "Anomaly", count: anomalyCount },
   ];
 
   return (
@@ -376,43 +424,40 @@ export default function PlaneDashboard() {
         ))}
       </div>
 
-      {/* Filters — hidden on anomaly tab */}
+      {/* Filters */}
       {activeTab !== "anomaly" && filterOptions && (
         <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "1.25rem 1.5rem", marginBottom: "1.5rem", display: "flex", flexWrap: "wrap", gap: "1.25rem", alignItems: "flex-end" }}>
-          <FilterSelect label="Project"    value={fProject}   options={filterOptions.projects.map(p   => ({ value: p.id,   label: p.name }))} onChange={setFProject} />
-          <FilterSelect label="Created by" value={fCreatedBy} options={filterOptions.members.map(m    => ({ value: m,      label: m }))}       onChange={setFCreatedBy} />
-          <FilterSelect label="Assignee"   value={fAssignee}  options={filterOptions.members.map(m    => ({ value: m,      label: m }))}       onChange={setFAssignee} />
-          <FilterSelect label="Module"     value={fModule}    options={filterOptions.modules.map(m    => ({ value: m,      label: m }))}       onChange={setFModule} />
-          <FilterSelect label="Cycle"      value={fCycle}     options={filterOptions.cycles.map(c     => ({ value: c,      label: c }))}       onChange={setFCycle} />
-          <FilterSelect label="Priority"   value={fPriority}  options={filterOptions.priorities.map(p => ({ value: p,     label: PRIORITY_META[p]?.label ?? p }))} onChange={setFPriority} />
-          <FilterSelect label="State"      value={fState}     options={filterOptions.states.map(s     => ({ value: s.name, label: s.name }))} onChange={setFState} />
-          {hasFilters && (
-            <button onClick={() => { setFProject(""); setFCreatedBy(""); setFAssignee(""); setFModule(""); setFCycle(""); setFPriority(""); setFState(""); }} style={{ padding: "6px 14px", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, color: "#ef4444", fontSize: "0.8rem", fontWeight: 600, cursor: "pointer", alignSelf: "flex-end" }}>
-              Clear filters
+          <MultiSelect label="Project"    selected={fProjects}   options={filterOptions.projects.map(p   => ({ value: p.id,   label: p.name }))} onChange={setFProjects} />
+          <MultiSelect label="Created by" selected={fCreatedBys} options={filterOptions.members.map(m    => ({ value: m,      label: m }))}       onChange={setFCreatedBys} />
+          <MultiSelect label="Assignee"   selected={fAssignees}  options={filterOptions.members.map(m    => ({ value: m,      label: m }))}       onChange={setFAssignees} />
+          <MultiSelect label="Module"     selected={fModules}    options={filterOptions.modules.map(m    => ({ value: m,      label: m }))}       onChange={setFModules} />
+          <MultiSelect label="Cycle"      selected={fCycles}     options={filterOptions.cycles.map(c     => ({ value: c,      label: c }))}       onChange={setFCycles} />
+          <MultiSelect label="Priority"   selected={fPriorities} options={filterOptions.priorities.map(p => ({ value: p,     label: PRIORITY_META[p]?.label ?? p }))} onChange={setFPriorities} />
+          <MultiSelect label="State"      selected={fStates}     options={filterOptions.states.map(s     => ({ value: s.name, label: s.name }))} onChange={setFStates} />
+          {hasFilters ? (
+            <button onClick={clearFilters} style={{ padding: "6px 14px", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, color: "#ef4444", fontSize: "0.8rem", fontWeight: 600, cursor: "pointer", alignSelf: "flex-end" }}>
+              Clear all
             </button>
-          )}
+          ) : null}
         </div>
       )}
 
       {error && <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "1rem 1.5rem", color: "#ef4444", marginBottom: "1rem" }}>Error: {error}</div>}
       {loading && <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "3rem", textAlign: "center", color: "var(--text-secondary)" }}>Loading issues from Plane...</div>}
 
-      {/* Anomaly tab */}
       {!loading && !error && activeTab === "anomaly" && <AnomalyTab issues={issues} />}
 
-      {/* Overdue banner */}
       {activeTab === "overdue" && !loading && (
         <div style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 10, padding: "0.75rem 1.25rem", marginBottom: "1rem", color: "#fca5a5", fontSize: "0.85rem" }}>
-          ⚠️ {filtered.length} issue{filtered.length !== 1 ? "s" : ""} overdue — sorted by most days past due
+          ⚠️ {filtered.length} issue{filtered.length !== 1 ? "s" : ""} overdue — Done issues excluded — sorted by most days past due
         </div>
       )}
 
-      {/* Overall / Overdue table */}
       {!loading && !error && activeTab !== "anomaly" && (
         <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, overflow: "hidden" }}>
           {filtered.length === 0
             ? <div style={{ padding: "3rem", textAlign: "center", color: "var(--text-secondary)" }}>No issues match the current filters.</div>
-            : <IssueTable issues={filtered} activeTab={activeTab} />
+            : <IssueTable issues={filtered} showOverdue={activeTab === "overdue"} />
           }
           {filtered.length > 0 && (
             <div style={{ borderTop: "1px solid var(--border-glass)", padding: "10px 14px", color: "var(--text-secondary)", fontSize: "0.78rem" }}>

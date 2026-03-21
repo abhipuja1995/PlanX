@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "planx (Next.js)",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /Users/abhijit/Documents/planx && node_modules/.bin/next dev"],
+      "port": 3000,
+      "autoPort": true
+    }
+  ]
+}

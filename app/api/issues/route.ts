@@ -34,7 +34,6 @@ export async function GET() {
         members.map((m: any) => [m.member?.id ?? m.id, m.member ?? m])
       );
 
-      // Build issue → cycle/module mappings
       const [cycleEntries, moduleEntries] = await Promise.all([
         Promise.all(cycles.map(async (c: any) => {
           const items = arr(await client.listCycleIssues(WS, pid, c.id).catch(() => []));
@@ -79,7 +78,8 @@ export async function GET() {
           created_by: resolveMember(issue.created_by),
           created_by_id: issue.created_by,
           created_at: issue.created_at,
-          due_date: issue.due_date ?? null,
+          start_date: issue.start_date ?? null,       // Plane field: start_date
+          due_date: issue.target_date ?? null,         // Plane field: target_date
           labels: (issue.label_ids ?? []).map((lid: string) => labelMap[lid]?.name ?? lid),
           cycle: issueCycle[issue.id] ?? null,
           modules: issueModules[issue.id] ?? [],

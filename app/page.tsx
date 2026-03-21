@@ -1021,6 +1021,8 @@ export default function PlaneDashboard() {
   const [fCycles,      setFCycles]      = useState<string[]>([]);
   const [fPriorities,  setFPriorities]  = useState<string[]>([]);
   const [fStates,      setFStates]      = useState<string[]>([]);
+  const [fDateFrom,    setFDateFrom]    = useState<string>("");
+  const [fDateTo,      setFDateTo]      = useState<string>("");
 
   useEffect(() => {
     fetch("/api/issues")
@@ -1054,8 +1056,8 @@ export default function PlaneDashboard() {
       .catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
-  const hasFilters = fProjects.length || fCreatedBys.length || fAssignees.length || fModules.length || fCycles.length || fPriorities.length || fStates.length;
-  const clearFilters = () => { setFProjects([]); setFCreatedBys([]); setFAssignees([]); setFModules([]); setFCycles([]); setFPriorities([]); setFStates([]); };
+  const hasFilters = fProjects.length || fCreatedBys.length || fAssignees.length || fModules.length || fCycles.length || fPriorities.length || fStates.length || fDateFrom || fDateTo;
+  const clearFilters = () => { setFProjects([]); setFCreatedBys([]); setFAssignees([]); setFModules([]); setFCycles([]); setFPriorities([]); setFStates([]); setFDateFrom(""); setFDateTo(""); };
 
   const filtered = useMemo(() => {
     let list = issues;
@@ -1066,12 +1068,14 @@ export default function PlaneDashboard() {
     if (fCycles.length)     list = list.filter(i => i.cycle && fCycles.includes(i.cycle));
     if (fPriorities.length) list = list.filter(i => fPriorities.includes(i.priority));
     if (fStates.length)     list = list.filter(i => fStates.includes(i.state_name));
+    if (fDateFrom)          list = list.filter(i => !!i.created_at && i.created_at.slice(0, 10) >= fDateFrom);
+    if (fDateTo)            list = list.filter(i => !!i.created_at && i.created_at.slice(0, 10) <= fDateTo);
     if (activeTab === "overdue") {
       list = list.filter(i => !isDone(i) && overdueDays(i.due_date) !== null);
       list = [...list].sort((a, b) => (overdueDays(b.due_date) ?? 0) - (overdueDays(a.due_date) ?? 0));
     }
     return list;
-  }, [issues, fProjects, fCreatedBys, fAssignees, fModules, fCycles, fPriorities, fStates, activeTab]);
+  }, [issues, fProjects, fCreatedBys, fAssignees, fModules, fCycles, fPriorities, fStates, fDateFrom, fDateTo, activeTab]);
 
   const overdueCount = useMemo(() => issues.filter(i => !isDone(i) && overdueDays(i.due_date) !== null).length, [issues]);
   const anomalyCount = useMemo(() => issues.filter(i => !isDone(i) && ANOMALY_TYPES.some(a => a.check(i))).length, [issues]);
@@ -1116,7 +1120,18 @@ export default function PlaneDashboard() {
           <MultiSelect label="Module"     selected={fModules}    options={filterOptions.modules.map(m    => ({ value: m,      label: m }))}       onChange={setFModules} />
           <MultiSelect label="Cycle"      selected={fCycles}     options={filterOptions.cycles.map(c     => ({ value: c,      label: c }))}       onChange={setFCycles} />
           <MultiSelect label="Priority"   selected={fPriorities} options={filterOptions.priorities.map(p => ({ value: p,     label: PRIORITY_META[p]?.label ?? p }))} onChange={setFPriorities} />
-          <MultiSelect label="State"      selected={fStates}     options={filterOptions.states.map(s     => ({ value: s.name, label: s.name }))} onChange={setFStates} />
+          <MultiSelect label="State"      selected={fStates}     options={Array.from(new Map(filterOptions.states.map(s => [s.name, s])).values()).map(s => ({ value: s.name, label: s.name }))} onChange={setFStates} />
+          {/* Date range filter */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 130 }}>
+            <label style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Created From</label>
+            <input type="date" value={fDateFrom} onChange={e => setFDateFrom(e.target.value)}
+              style={{ background: "rgba(15,23,42,0.8)", border: `1px solid ${fDateFrom ? "#3b82f6" : "var(--border-glass)"}`, color: fDateFrom ? "var(--text-primary)" : "var(--text-secondary)", padding: "6px 10px", borderRadius: 8, fontSize: "0.82rem", outline: "none", cursor: "pointer", colorScheme: "dark" }} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 130 }}>
+            <label style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>Created To</label>
+            <input type="date" value={fDateTo} onChange={e => setFDateTo(e.target.value)}
+              style={{ background: "rgba(15,23,42,0.8)", border: `1px solid ${fDateTo ? "#3b82f6" : "var(--border-glass)"}`, color: fDateTo ? "var(--text-primary)" : "var(--text-secondary)", padding: "6px 10px", borderRadius: 8, fontSize: "0.82rem", outline: "none", cursor: "pointer", colorScheme: "dark" }} />
+          </div>
           {hasFilters ? (
             <button onClick={clearFilters} style={{ padding: "6px 14px", background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 8, color: "#ef4444", fontSize: "0.8rem", fontWeight: 600, cursor: "pointer", alignSelf: "flex-end" }}>
               Clear all

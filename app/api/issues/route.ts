@@ -48,18 +48,20 @@ export async function GET(req: Request) {
       );
 
       // N+1 cycle/module calls — only run on enrich request
-      const issueCycle:   Record<string, string>   = {};
+      const issueCycle:   Record<string, { name: string; end_date: string | null }> = {};
       const issueModules: Record<string, string[]> = {};
 
       if (enrich) {
         const cycleResults = await batchedMap(cycles, async (c: any) => {
           const items = arr(await client.listCycleIssues(WS, pid, c.id).catch(() => []));
+          const cy = cycleMap[c.id];
+          const end_date = cy?.end_date ?? cy?.ended_at ?? null;
           // API returns full issue objects — the issue ID is in the `id` field
-          return items.map((ci: any) => ({ iid: ci.id ?? ci.issue ?? ci.issue_id, name: cycleMap[c.id]?.name ?? c.id }));
+          return items.map((ci: any) => ({ iid: ci.id ?? ci.issue ?? ci.issue_id, name: cy?.name ?? c.id, end_date }));
         });
         for (const entries of cycleResults)
-          for (const { iid, name } of (entries as any[]))
-            if (iid) issueCycle[iid] = name;
+          for (const { iid, name, end_date } of (entries as any[]))
+            if (iid) issueCycle[iid] = { name, end_date };
 
         const modResults = await batchedMap(mods, async (m: any) => {
           const items = arr(await client.listModuleIssues(WS, pid, m.id).catch(() => []));
@@ -97,8 +99,11 @@ export async function GET(req: Request) {
           created_at: issue.created_at,
           start_date: issue.start_date ?? null,
           due_date: issue.target_date ?? null,
+          completed_at: issue.completed_at ?? null,
+          updated_at: issue.updated_at ?? null,
           labels: labelIds.map((lid: string) => labelMap[lid]?.name).filter(Boolean),
-          cycle: issueCycle[issue.id] ?? null,
+          cycle: issueCycle[issue.id]?.name ?? null,
+          cycle_end_date: issueCycle[issue.id]?.end_date ?? null,
           modules: issueModules[issue.id] ?? [],
           parent: issue.parent ?? null,
           project_id: pid,

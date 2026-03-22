@@ -148,7 +148,7 @@ export async function GET(req: Request) {
       if (mem?.id && mem?.email) {
         memberMap[mem.id] = {
           email: mem.email,
-          name: (mem.display_name ?? `${mem.first_name ?? ""} ${mem.last_name ?? ""}`.trim() || mem.email),
+          name: (mem.display_name ?? (`${mem.first_name ?? ""} ${mem.last_name ?? ""}`.trim() || mem.email)),
         };
       }
     }

@@ -219,14 +219,16 @@ export async function GET(req: Request) {
 
     if (!dryRun) {
       const nodemailer = (await import("nodemailer")).default;
-      const dns = await import("dns");
+      const smtpHostname = process.env.SMTP_HOST ?? "smtp.gmail.com";
+      // Pre-resolve to IPv4 to avoid Railway's IPv6-only DNS returning unreachable addresses
+      const { promises: dnsPromises } = await import("dns");
+      const { address: smtpIp } = await dnsPromises.lookup(smtpHostname, { family: 4 });
       const transporter = nodemailer.createTransport({
-        host:   process.env.SMTP_HOST ?? "smtp.gmail.com",
+        host:   smtpIp,
         port:   Number(process.env.SMTP_PORT ?? 587),
         secure: process.env.SMTP_SECURE === "true",
         auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-        dnsLookup: (hostname: string, options: any, callback: any) =>
-          dns.default.lookup(hostname, { ...options, family: 4 }, callback),
+        tls:    { servername: smtpHostname }, // keep TLS cert validation working
       });
 
       const from = process.env.SMTP_FROM ?? `Nirmaan <${process.env.SMTP_USER}>`;

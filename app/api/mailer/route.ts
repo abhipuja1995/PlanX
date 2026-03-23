@@ -218,9 +218,26 @@ export async function GET(req: Request) {
     const preview: any[] = [];
 
     if (!dryRun) {
-      const { Resend } = await import("resend");
-      const resend = new Resend(process.env.RESEND_API_KEY!);
-      const from = process.env.SMTP_FROM ?? "Nirmaan <nirmaan@credresolve.com>";
+      const BREVO_KEY = process.env.BREVO_API_KEY!;
+      const fromEmail = process.env.SMTP_FROM_EMAIL ?? "abhijit.scd@gmail.com";
+      const fromName  = process.env.SMTP_FROM_NAME  ?? "Nirmaan";
+
+      async function brevoSend(to: string, subject: string, html: string) {
+        const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+          method: "POST",
+          headers: { "api-key": BREVO_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sender:      { name: fromName, email: fromEmail },
+            to:          [{ email: to }],
+            subject,
+            htmlContent: html,
+          }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Brevo ${res.status}: ${text}`);
+        }
+      }
 
       // Build all mail jobs upfront
       type MailJob = { to: string; subject: string; html: string; label: string };
@@ -271,16 +288,16 @@ export async function GET(req: Request) {
         });
       }
 
-      // Send via Resend HTTP API — no SMTP, no port issues
+      // Send via Brevo HTTP API — no SMTP, works on Railway
       setImmediate(async () => {
         for (const job of jobs) {
           try {
-            await resend.emails.send({ from, to: job.to, subject: job.subject, html: job.html });
+            await brevoSend(job.to, job.subject, job.html);
             console.log(`[mailer] sent: ${job.label}`);
           } catch (err: any) {
             console.error(`[mailer] failed: ${job.label} —`, err.message);
           }
-          await new Promise(r => setTimeout(r, 1000)); // 1s gap — stay within Resend rate limits
+          await new Promise(r => setTimeout(r, 500)); // 0.5s gap between sends
         }
         console.log(`[mailer] all ${jobs.length} jobs complete`);
       });

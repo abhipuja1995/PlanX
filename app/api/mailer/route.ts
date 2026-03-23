@@ -218,20 +218,9 @@ export async function GET(req: Request) {
     const preview: any[] = [];
 
     if (!dryRun) {
-      const nodemailer = (await import("nodemailer")).default;
-      const smtpHostname = process.env.SMTP_HOST ?? "smtp.gmail.com";
-      // Pre-resolve to IPv4 to avoid Railway's IPv6-only DNS returning unreachable addresses
-      const { promises: dnsPromises } = await import("dns");
-      const { address: smtpIp } = await dnsPromises.lookup(smtpHostname, { family: 4 });
-      const transporter = nodemailer.createTransport({
-        host:   smtpIp,
-        port:   Number(process.env.SMTP_PORT ?? 587),
-        secure: process.env.SMTP_SECURE === "true",
-        auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-        tls:    { servername: smtpHostname }, // keep TLS cert validation working
-      });
-
-      const from = process.env.SMTP_FROM ?? `Nirmaan <${process.env.SMTP_USER}>`;
+      const { Resend } = await import("resend");
+      const resend = new Resend(process.env.RESEND_API_KEY!);
+      const from = process.env.SMTP_FROM ?? "Nirmaan <onboarding@resend.dev>";
 
       // Overdue emails
       for (const [, { email, name, issues }] of Object.entries(overdueByAssignee)) {
@@ -240,10 +229,10 @@ export async function GET(req: Request) {
         const bulletList = issueBulletList(sorted, i => `${i.state_name} · ${i._days}d overdue · ${i.project_name}`);
         const urgentCount = issues.filter(i => (i.priority === "urgent" || i.priority === "high")).length;
         const urgentNote = urgentCount > 0 ? `, including ${urgentCount} high-priority` : "";
-        const recipient = testTo ? `${testTo} [test — actual: ${email}]` : email;
-        await transporter.sendMail({
+        const recipient = testTo ?? email;
+        await resend.emails.send({
           from,
-          to: testTo ?? email,
+          to: recipient,
           subject: `🚨 Action Required: ${issues.length} Overdue Issue${issues.length !== 1 ? "s" : ""} Assigned to You${urgentCount > 0 ? ` (${urgentCount} High Priority)` : ""} — ${dateStr}`,
           html: buildHtml({
             recipientName: testTo ? `${name} (test mode)` : name,
@@ -253,23 +242,23 @@ export async function GET(req: Request) {
             rows,
           }),
         });
-        sent.push(`overdue → ${recipient} (${issues.length} issues)`);
+        sent.push(`overdue → ${recipient}${testTo ? ` [actual: ${email}]` : ""} (${issues.length} issues)`);
       }
 
       // Anomaly emails
       for (const [, { email, name, issues }] of Object.entries(anomalyByCreator)) {
         const rows = issues.map(i => anomalyRow(i)).join("");
         const bulletList = issueBulletList(issues, i => i.anomalies.join(", "));
-        const missingDue   = issues.filter(i => i.anomalies.includes("No Due Date")).length;
-        const unassigned   = issues.filter(i => i.anomalies.includes("Unassigned")).length;
+        const missingDue = issues.filter(i => i.anomalies.includes("No Due Date")).length;
+        const unassigned = issues.filter(i => i.anomalies.includes("Unassigned")).length;
         const parts: string[] = [];
-        if (missingDue)  parts.push(`${missingDue} without a due date`);
-        if (unassigned)  parts.push(`${unassigned} unassigned`);
+        if (missingDue) parts.push(`${missingDue} without a due date`);
+        if (unassigned) parts.push(`${unassigned} unassigned`);
         const detail = parts.length ? ` (${parts.join(", ")})` : "";
-        const recipient = testTo ? `${testTo} [test — actual: ${email}]` : email;
-        await transporter.sendMail({
+        const recipient = testTo ?? email;
+        await resend.emails.send({
           from,
-          to: testTo ?? email,
+          to: recipient,
           subject: `⚠️ Escalation: ${issues.length} Issue${issues.length !== 1 ? "s" : ""} You Created Have Incomplete Data${detail ? " — Fix Needed" : ""} — ${dateStr}`,
           html: buildHtml({
             recipientName: testTo ? `${name} (test mode)` : name,
@@ -279,7 +268,7 @@ export async function GET(req: Request) {
             rows,
           }),
         });
-        sent.push(`anomaly → ${recipient} (${issues.length} issues)`);
+        sent.push(`anomaly → ${recipient}${testTo ? ` [actual: ${email}]` : ""} (${issues.length} issues)`);
       }
     } else {
       // Dry run — return what would be sent

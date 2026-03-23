@@ -288,15 +288,24 @@ export async function GET(req: Request) {
         });
       }
 
-      // Send in batches of 5, fresh transporter per batch to avoid socket timeouts
-      const BATCH = 5;
-      for (let i = 0; i < jobs.length; i += BATCH) {
-        const batch = jobs.slice(i, i + BATCH);
-        const t = makeTransporter();
-        await Promise.all(batch.map(j => t.sendMail({ from, to: j.to, subject: j.subject, html: j.html })));
-        t.close();
-        batch.forEach(j => sent.push(j.label));
-      }
+      // Return HTTP response immediately — send emails in background over ~30 min
+      const SPREAD_MS = Math.max(5000, Math.floor((28 * 60 * 1000) / jobs.length)); // spread evenly across 28 min
+      setImmediate(async () => {
+        for (const job of jobs) {
+          try {
+            const t = makeTransporter();
+            await t.sendMail({ from, to: job.to, subject: job.subject, html: job.html });
+            t.close();
+            console.log(`[mailer] sent: ${job.label}`);
+          } catch (err: any) {
+            console.error(`[mailer] failed: ${job.label} —`, err.message);
+          }
+          await new Promise(r => setTimeout(r, SPREAD_MS));
+        }
+        console.log(`[mailer] all ${jobs.length} jobs complete`);
+      });
+
+      sent.push(...jobs.map(j => j.label)); // return labels immediately for visibility
     } else {
       // Dry run — return what would be sent
       for (const [id, { email, name, issues }] of Object.entries(overdueByAssignee)) {

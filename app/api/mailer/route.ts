@@ -222,7 +222,7 @@ export async function GET(req: Request) {
       const fromEmail = process.env.SMTP_FROM_EMAIL ?? "abhijit.scd@gmail.com";
       const fromName  = process.env.SMTP_FROM_NAME  ?? "Nirmaan";
 
-      async function brevoSend(to: string, subject: string, html: string) {
+      const brevoSend = async (to: string, subject: string, html: string) => {
         const res = await fetch("https://api.brevo.com/v3/smtp/email", {
           method: "POST",
           headers: { "api-key": BREVO_KEY, "Content-Type": "application/json" },
@@ -237,7 +237,7 @@ export async function GET(req: Request) {
           const text = await res.text();
           throw new Error(`Brevo ${res.status}: ${text}`);
         }
-      }
+      };
 
       // Build all mail jobs upfront
       type MailJob = { to: string; subject: string; html: string; label: string };

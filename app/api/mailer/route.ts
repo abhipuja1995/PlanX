@@ -222,6 +222,7 @@ export async function GET(req: Request) {
       const fromEmail = process.env.SMTP_FROM_EMAIL ?? "abhijit.scd@gmail.com";
       const fromName  = process.env.SMTP_FROM_NAME  ?? "Nirmaan";
 
+      const replyTo = process.env.SMTP_REPLY_TO ?? "abhijit.scd@gmail.com";
       const brevoSend = async (to: string, subject: string, html: string) => {
         const res = await fetch("https://api.brevo.com/v3/smtp/email", {
           method: "POST",
@@ -229,6 +230,7 @@ export async function GET(req: Request) {
           body: JSON.stringify({
             sender:      { name: fromName, email: fromEmail },
             to:          [{ email: to }],
+            replyTo:     { email: replyTo },
             subject,
             htmlContent: html,
           }),

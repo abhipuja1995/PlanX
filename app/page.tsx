@@ -1,7 +1,11 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useSession, signOut } from "next-auth/react";
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  AreaChart, Area, PieChart, Pie, Cell, RadialBarChart, RadialBar,
+} from "recharts";
 
 interface Issue {
   id: string;
@@ -478,30 +482,198 @@ function DrilldownModal({ title, issues, onClose }: { title: string; issues: Iss
   );
 }
 
-// ── Insights tab ──────────────────────────────────────────────────────────
+
+// ── Helpers for insights ──────────────────────────────────────────────────
+function staleDays(i: Issue): number {
+  const ref = i.updated_at || i.created_at;
+  if (!ref) return 0;
+  const diff = (Date.now() - new Date(ref).getTime()) / 86400000;
+  return Math.floor(diff);
+}
+function isStale(i: Issue): boolean {
+  return !isDone(i) && staleDays(i) >= 5;
+}
+function cycleDays(i: Issue): number | null {
+  if (!i.completed_at || !i.created_at) return null;
+  const diff = (new Date(i.completed_at).getTime() - new Date(i.created_at).getTime()) / 86400000;
+  return diff > 0 ? Math.round(diff) : null;
+}
+function getWeekBuckets(n = 8) {
+  const now = new Date();
+  return Array.from({ length: n }, (_, idx) => {
+    const start = new Date(now);
+    start.setDate(now.getDate() - (n - 1 - idx) * 7);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 7);
+    return {
+      label: start.toLocaleDateString("en-IN", { day: "2-digit", month: "short" }),
+      start,
+      end,
+    };
+  });
+}
+
+// ── RAG badge ─────────────────────────────────────────────────────────────
+function RAGBadge({ rag, label }: { rag: string; label: string }) {
+  const color = rag === "green" ? "#22c55e" : rag === "amber" ? "#f59e0b" : "#ef4444";
+  const bg    = rag === "green" ? "rgba(34,197,94,0.12)" : rag === "amber" ? "rgba(245,158,11,0.12)" : "rgba(239,68,68,0.12)";
+  const dot   = rag === "green" ? "🟢" : rag === "amber" ? "🟡" : "🔴";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 16px", background: bg, border: `1px solid ${color}40`, borderRadius: 9999, fontSize: "0.85rem", fontWeight: 700, color }}>
+      {dot} {label}
+    </span>
+  );
+}
+
+// ── Insights sub-components ───────────────────────────────────────────────
+function AIInsightCard({ icon, title, items, color, loading }: { icon: string; title: string; items: string[]; color: string; loading: boolean }) {
+  return (
+    <div style={{ background: "var(--bg-card)", border: `1px solid ${color}30`, borderRadius: 14, padding: "1.2rem 1.4rem", flex: 1, minWidth: 260 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <span style={{ fontSize: "1.2rem" }}>{icon}</span>
+        <span style={{ fontWeight: 700, fontSize: "0.9rem", color }}>{title}</span>
+      </div>
+      {loading ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {[1,2,3].map(n => <div key={n} style={{ height: 14, background: "rgba(255,255,255,0.06)", borderRadius: 7, width: `${60 + n*10}%`, animation: "pulse 1.5s ease-in-out infinite" }} />)}
+        </div>
+      ) : (
+        <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+          {items.map((item, idx) => (
+            <li key={idx} style={{ display: "flex", gap: 8, fontSize: "0.82rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              <span style={{ color, flexShrink: 0, marginTop: 1 }}>•</span>
+              <span>{item}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function MetricTile({ label, value, sub, color }: { label: string; value: string | number; sub?: string; color: string }) {
+  return (
+    <div style={{ background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "1rem 1.25rem", display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontSize: "0.68rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 700, letterSpacing: "0.06em" }}>{label}</span>
+      <span style={{ fontSize: "1.6rem", fontWeight: 800, color, lineHeight: 1.1 }}>{value}</span>
+      {sub && <span style={{ fontSize: "0.72rem", color: "var(--text-secondary)" }}>{sub}</span>}
+    </div>
+  );
+}
+
+const CHART_COLORS = ["#3b82f6","#8b5cf6","#10b981","#f59e0b","#ef4444","#ec4899","#06b6d4","#84cc16"];
+
+// ── InsightsTab ────────────────────────────────────────────────────────────
 function InsightsTab({ issues }: { issues: Issue[] }) {
+  const [subTab, setSubTab] = useState<"summary" | "charts" | "daily" | "weekly">("summary");
   const [drilldown, setDrilldown] = useState<{ title: string; issues: Issue[] } | null>(null);
   const [stateTime, setStateTime] = useState<"all" | "week" | "month">("all");
+  const [assigneeSearch, setAssigneeSearch] = useState("");
+  const [creatorSearch, setCreatorSearch]   = useState("");
+  const [aiData, setAiData]   = useState<Record<string, unknown> | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+
   const openDrilldown = (title: string, list: Issue[]) => setDrilldown({ title, issues: list });
   const closeDrilldown = () => setDrilldown(null);
 
-  const active = useMemo(() => issues.filter(i => !isDone(i)), [issues]);
-  const total = active.length;
-
-  // Shared table styles
   const thS: React.CSSProperties = { padding: "6px 10px", textAlign: "left", color: "var(--text-secondary)", fontWeight: 600, fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.05em", whiteSpace: "nowrap", background: "rgba(15,23,42,0.3)" };
   const tdS: React.CSSProperties = { padding: "8px 10px", verticalAlign: "middle", fontSize: "0.82rem" };
   const tblStyle: React.CSSProperties = { width: "100%", borderCollapse: "collapse" };
   const rowStyle: React.CSSProperties = { borderBottom: "1px solid rgba(255,255,255,0.04)" };
 
-  // ── Priority ──
-  const byPriority = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const i of active) counts[i.priority] = (counts[i.priority] ?? 0) + 1;
-    return ["urgent", "high", "medium", "low", "none"].map(p => ({ key: p, label: PRIORITY_META[p].label, count: counts[p] ?? 0, color: PRIORITY_META[p].color, issues: active.filter(i => i.priority === p) }));
-  }, [active]);
+  // ── Core metrics ──────────────────────────────────────────────────────
+  const today = new Date(); today.setHours(0,0,0,0);
+  const weekAgo = new Date(today); weekAgo.setDate(today.getDate() - 7);
 
-  // ── By State with time filter ──
+  const active   = useMemo(() => issues.filter(i => !isDone(i)), [issues]);
+  const total    = active.length;
+  const overdueIssues    = useMemo(() => issues.filter(i => !isDone(i) && isOverdue(i)), [issues]);
+  const anomalyIssues    = useMemo(() => issues.filter(i => !isDone(i) && ANOMALY_TYPES.some(a => a.check(i))), [issues]);
+  const unassignedIssues = useMemo(() => issues.filter(i => !isDone(i) && i.assignees.length === 0), [issues]);
+  const noDateIssues     = useMemo(() => issues.filter(i => !isDone(i) && !i.due_date), [issues]);
+  const staleIssues      = useMemo(() => issues.filter(isStale), [issues]);
+  const wipIssues        = useMemo(() => issues.filter(i => i.state_group === "started"), [issues]);
+  const completedThisWeek= useMemo(() => issues.filter(i => isDone(i) && i.completed_at && new Date(i.completed_at) >= weekAgo), [issues]);
+  const createdThisWeek  = useMemo(() => issues.filter(i => i.created_at && new Date(i.created_at) >= weekAgo), [issues]);
+
+  const avgCycleTimeDays = useMemo(() => {
+    const times = issues.filter(isDone).map(cycleDays).filter((d): d is number => d !== null);
+    return times.length ? times.reduce((s,v) => s+v, 0) / times.length : 0;
+  }, [issues]);
+
+  const bugIssues   = useMemo(() => issues.filter(i => i.labels.includes("Bug")), [issues]);
+  const bugsThisWeek = bugIssues.filter(i => i.created_at && new Date(i.created_at) >= weekAgo).length;
+  const bugsResolved = bugIssues.filter(i => isDone(i) && i.completed_at && new Date(i.completed_at) >= weekAgo).length;
+
+  // ── Charts data ───────────────────────────────────────────────────────
+  const weekBuckets = useMemo(() => getWeekBuckets(8), []);
+
+  const createdVsResolvedData = useMemo(() =>
+    weekBuckets.map(w => ({
+      week: w.label,
+      Created: issues.filter(i => i.created_at && new Date(i.created_at) >= w.start && new Date(i.created_at) < w.end).length,
+      Resolved: issues.filter(i => isDone(i) && i.completed_at && new Date(i.completed_at) >= w.start && new Date(i.completed_at) < w.end).length,
+    })),
+  [issues, weekBuckets]);
+
+  const stateDonutData = useMemo(() => {
+    const m = new Map<string, { count: number; color: string }>();
+    for (const i of issues) {
+      const e = m.get(i.state_name) ?? { count: 0, color: i.state_color };
+      e.count++;
+      m.set(i.state_name, e);
+    }
+    return Array.from(m.entries())
+      .map(([name, { count, color }]) => ({ name, value: count, color }))
+      .sort((a,b) => b.value - a.value);
+  }, [issues]);
+
+  const priorityChartData = useMemo(() =>
+    ["urgent","high","medium","low","none"].map(p => ({
+      name: PRIORITY_META[p].label,
+      value: issues.filter(i => i.priority === p).length,
+      color: PRIORITY_META[p].color,
+    })).filter(d => d.value > 0),
+  [issues]);
+
+  const wipByAssignee = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const i of wipIssues) {
+      const names = i.assignees.length > 0 ? i.assignees : ["Unassigned"];
+      for (const n of names) m.set(n, (m.get(n) ?? 0) + 1);
+    }
+    return Array.from(m.entries())
+      .map(([name, value]) => ({ name, value }))
+      .sort((a,b) => b.value - a.value)
+      .slice(0, 10);
+  }, [wipIssues]);
+
+  const cycleTimeByProject = useMemo(() => {
+    const m = new Map<string, number[]>();
+    for (const i of issues.filter(isDone)) {
+      const d = cycleDays(i);
+      if (d === null) continue;
+      const arr = m.get(i.project_name) ?? [];
+      arr.push(d);
+      m.set(i.project_name, arr);
+    }
+    return Array.from(m.entries())
+      .map(([name, days]) => ({ name, avg: Math.round(days.reduce((s,v)=>s+v,0)/days.length), count: days.length }))
+      .sort((a,b) => b.avg - a.avg);
+  }, [issues]);
+
+  // ── Summary tab data ──────────────────────────────────────────────────
+  const byPriority = useMemo(() =>
+    ["urgent","high","medium","low","none"].map(p => ({
+      key: p, label: PRIORITY_META[p].label,
+      count: active.filter(i => i.priority === p).length,
+      color: PRIORITY_META[p].color,
+      issues: active.filter(i => i.priority === p),
+    })),
+  [active]);
+
   const byStateEnhanced = useMemo(() => {
     const base = stateTime === "week" ? issues.filter(isThisWeek) : stateTime === "month" ? issues.filter(isThisMonth) : issues;
     const map = new Map<string, { color: string; issuesTotal: Issue[]; issuesOverdue: Issue[]; issuesDoneAfterDue: Issue[] }>();
@@ -512,362 +684,657 @@ function InsightsTab({ issues }: { issues: Issue[] }) {
       if (isDoneAfterDue(i)) e.issuesDoneAfterDue.push(i);
       map.set(i.state_name, e);
     }
-    return Array.from(map.entries())
-      .map(([name, e]) => ({ name, ...e }))
-      .sort((a, b) => b.issuesTotal.length - a.issuesTotal.length);
+    return Array.from(map.entries()).map(([name, e]) => ({ name, ...e })).sort((a,b) => b.issuesTotal.length - a.issuesTotal.length);
   }, [issues, stateTime]);
 
-  // ── By Cycle ──
   const byCycleEnhanced = useMemo(() => {
     const cycleMap = new Map<string, { end_date: string | null; issues: Issue[] }>();
     const noCycleIssues: Issue[] = [];
     for (const i of issues) {
       if (!i.cycle) { noCycleIssues.push(i); continue; }
       const e = cycleMap.get(i.cycle) ?? { end_date: i.cycle_end_date, issues: [] };
-      e.issues.push(i);
-      cycleMap.set(i.cycle, e);
+      e.issues.push(i); cycleMap.set(i.cycle, e);
     }
-    // Collect top states across all issues for column headers
-    const stateCounts: Record<string, number> = {};
+    const stateCounts: Record<string,number> = {};
     for (const i of issues) stateCounts[i.state_name] = (stateCounts[i.state_name] ?? 0) + 1;
-    const topStates = Object.entries(stateCounts).sort(([,a],[,b]) => b - a).slice(0, 6).map(([s]) => s);
-
+    const topStates = Object.entries(stateCounts).sort(([,a],[,b]) => b-a).slice(0,6).map(([s]) => s);
     const rows = Array.from(cycleMap.entries()).map(([cycleName, { end_date, issues: cIssues }]) => {
-      const byState: Record<string, Issue[]> = {};
+      const byState: Record<string,Issue[]> = {};
       const spilled: Issue[] = [];
-      for (const i of cIssues) {
-        byState[i.state_name] ??= [];
-        byState[i.state_name].push(i);
-        if (isSpillover(i)) spilled.push(i);
-      }
+      for (const i of cIssues) { byState[i.state_name] ??= []; byState[i.state_name].push(i); if (isSpillover(i)) spilled.push(i); }
       return { cycleName, end_date, total: cIssues.length, byState, spilled, allIssues: cIssues };
-    }).sort((a, b) => b.total - a.total);
-
+    }).sort((a,b) => b.total - a.total);
     if (noCycleIssues.length > 0) {
-      const byState: Record<string, Issue[]> = {};
+      const byState: Record<string,Issue[]> = {};
       for (const i of noCycleIssues) { byState[i.state_name] ??= []; byState[i.state_name].push(i); }
       rows.push({ cycleName: "(No Cycle)", end_date: null, total: noCycleIssues.length, byState, spilled: [], allIssues: noCycleIssues });
     }
     return { rows, topStates };
   }, [issues]);
 
-  // ── By Module ──
   const byModuleEnhanced = useMemo(() => {
-    const modMap = new Map<string, { issues: Issue[]; byState: Record<string, Issue[]> }>();
+    const modMap = new Map<string, { issues: Issue[]; byState: Record<string,Issue[]> }>();
     for (const i of issues) {
       const mods = i.modules.length > 0 ? i.modules : ["(No Module)"];
       for (const m of mods) {
         const e = modMap.get(m) ?? { issues: [], byState: {} };
-        e.issues.push(i);
-        e.byState[i.state_name] ??= [];
-        e.byState[i.state_name].push(i);
-        modMap.set(m, e);
+        e.issues.push(i); e.byState[i.state_name] ??= []; e.byState[i.state_name].push(i); modMap.set(m, e);
       }
     }
-    const stateCounts: Record<string, number> = {};
+    const stateCounts: Record<string,number> = {};
     for (const i of issues) stateCounts[i.state_name] = (stateCounts[i.state_name] ?? 0) + 1;
-    const topStates = Object.entries(stateCounts).sort(([,a],[,b]) => b - a).slice(0, 6).map(([s]) => s);
-
+    const topStates = Object.entries(stateCounts).sort(([,a],[,b]) => b-a).slice(0,6).map(([s]) => s);
     return {
-      rows: Array.from(modMap.entries())
-        .map(([modName, { issues: mIssues, byState }]) => ({ modName, total: mIssues.length, byState, allIssues: mIssues }))
-        .sort((a, b) => b.total - a.total),
+      rows: Array.from(modMap.entries()).map(([modName, { issues: mIssues, byState }]) => ({ modName, total: mIssues.length, byState, allIssues: mIssues })).sort((a,b) => b.total - a.total),
       topStates,
     };
   }, [issues]);
 
-  // ── Tags ──
   const byTagEnhanced = useMemo(() =>
     INSIGHT_TAGS.map(tag => {
       const tagIssues = issues.filter(i => i.labels.includes(tag));
-      const weekIssues  = tagIssues.filter(isThisWeek);
-      const monthIssues = tagIssues.filter(isThisMonth);
-      const byState: Record<string, { count: number; color: string; issues: Issue[] }> = {};
-      for (const i of tagIssues) {
-        byState[i.state_name] ??= { count: 0, color: i.state_color, issues: [] };
-        byState[i.state_name].count++;
-        byState[i.state_name].issues.push(i);
-      }
-      return { tag, tagIssues, weekIssues, monthIssues, byState };
+      const byState: Record<string,{ count: number; color: string; issues: Issue[] }> = {};
+      for (const i of tagIssues) { byState[i.state_name] ??= { count: 0, color: i.state_color, issues: [] }; byState[i.state_name].count++; byState[i.state_name].issues.push(i); }
+      return { tag, tagIssues, weekIssues: tagIssues.filter(isThisWeek), monthIssues: tagIssues.filter(isThisMonth), byState };
     }),
   [issues]);
 
-  // ── Assignees ──
-  const byAssignee = useMemo(() => {
-    const map = new Map<string, { total: Issue[]; open: Issue[]; overdue: Issue[]; done: Issue[]; spillovers: Issue[] }>();
+  const byAssigneeFiltered = useMemo(() => {
+    const map = new Map<string,{ total: Issue[]; open: Issue[]; overdue: Issue[]; done: Issue[]; spillovers: Issue[] }>();
     for (const i of issues) {
       const names = i.assignees.length > 0 ? i.assignees : ["(Unassigned)"];
       for (const name of names) {
         const e = map.get(name) ?? { total: [], open: [], overdue: [], done: [], spillovers: [] };
         e.total.push(i);
         if (i.state_group === "completed") e.done.push(i);
-        else {
-          e.open.push(i);
-          if (isOverdue(i)) e.overdue.push(i);
-          if (isSpillover(i)) e.spillovers.push(i);
-        }
+        else { e.open.push(i); if (isOverdue(i)) e.overdue.push(i); if (isSpillover(i)) e.spillovers.push(i); }
         map.set(name, e);
       }
     }
-    return Array.from(map.entries()).map(([name, d]) => ({ name, ...d })).sort((a, b) => b.total.length - a.total.length);
-  }, [issues]);
+    return Array.from(map.entries())
+      .map(([name, d]) => ({ name, ...d }))
+      .filter(a => !assigneeSearch || a.name.toLowerCase().includes(assigneeSearch.toLowerCase()))
+      .sort((a,b) => b.total.length - a.total.length);
+  }, [issues, assigneeSearch]);
+
+  // Creators for filter
+  const allCreators = useMemo(() => {
+    const m = new Map<string,{ name: string; issues: Issue[] }>();
+    for (const i of issues) {
+      const e = m.get(i.created_by) ?? { name: i.created_by, issues: [] };
+      e.issues.push(i); m.set(i.created_by, e);
+    }
+    return Array.from(m.values()).filter(c => !creatorSearch || c.name.toLowerCase().includes(creatorSearch.toLowerCase())).sort((a,b) => b.issues.length - a.issues.length);
+  }, [issues, creatorSearch]);
+
+  const TAG_COLORS: Record<string,string> = { "Bug": "#ef4444", "Lender Integration": "#a78bfa", "Vendor Integration": "#38bdf8" };
+
+  // ── AI Insights fetch ─────────────────────────────────────────────────
+  const fetchAI = useCallback(async () => {
+    setAiLoading(true); setAiError(null);
+    try {
+      const recentlyCompleted = completedThisWeek.slice(0, 5).map(i => ({ id: `${i.project_identifier}-${i.sequence_id}`, name: i.name }));
+      const upcomingDue = issues.filter(i => !isDone(i) && i.due_date && new Date(i.due_date) >= today && new Date(i.due_date) <= new Date(today.getTime() + 7*86400000))
+        .sort((a,b) => (a.due_date ?? "").localeCompare(b.due_date ?? ""))
+        .slice(0, 5).map(i => ({ id: `${i.project_identifier}-${i.sequence_id}`, name: i.name, due: i.due_date }));
+      const topCompletedProject = (() => {
+        const m = new Map<string,number>();
+        for (const i of completedThisWeek) m.set(i.project_name, (m.get(i.project_name) ?? 0) + 1);
+        return Array.from(m.entries()).sort(([,a],[,b]) => b-a)[0]?.[0] ?? null;
+      })();
+      const res = await fetch("/api/insights", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          total, overdue: overdueIssues.length, wip: wipIssues.length, stale: staleIssues.length,
+          unassigned: unassignedIssues.length, noDate: noDateIssues.length, anomalyCount: anomalyIssues.length,
+          createdThisWeek: createdThisWeek.length, resolvedThisWeek: completedThisWeek.length,
+          completedThisWeek: completedThisWeek.length, avgCycleTimeDays,
+          bugsThisWeek, bugsResolved, recentlyCompleted, upcomingDue, topCompletedProject,
+        }),
+      });
+      const data = await res.json();
+      setAiData(data);
+    } catch (e: unknown) {
+      setAiError((e as Error).message);
+    } finally {
+      setAiLoading(false);
+    }
+  }, [total, overdueIssues, wipIssues, staleIssues, unassignedIssues, noDateIssues, anomalyIssues, createdThisWeek, completedThisWeek, avgCycleTimeDays, bugsThisWeek, bugsResolved, issues, today]);
+
+  useEffect(() => {
+    if ((subTab === "daily" || subTab === "weekly") && !aiData && !aiLoading) {
+      fetchAI();
+    }
+  }, [subTab]);
 
   const kpi: React.CSSProperties = { background: "var(--bg-card)", border: "1px solid var(--border-glass)", borderRadius: 12, padding: "1rem 1.5rem", display: "flex", flexDirection: "column", gap: 4 };
-  const overdueIssues   = issues.filter(i => !isDone(i) && isOverdue(i));
-  const anomalyIssues   = issues.filter(i => !isDone(i) && ANOMALY_TYPES.some(a => a.check(i)));
-  const unassignedIssues= issues.filter(i => !isDone(i) && i.assignees.length === 0);
-  const noDateIssues    = issues.filter(i => !isDone(i) && !i.due_date);
 
-  const TAG_COLORS: Record<string, string> = { "Bug": "#ef4444", "Lender Integration": "#a78bfa", "Vendor Integration": "#38bdf8" };
+  const subTabStyle = (k: string): React.CSSProperties => ({
+    padding: "7px 18px", borderRadius: 9999, fontSize: "0.82rem", fontWeight: 600,
+    cursor: "pointer", border: `1px solid ${subTab === k ? "#3b82f6" : "var(--border-glass)"}`,
+    background: subTab === k ? "rgba(59,130,246,0.15)" : "transparent",
+    color: subTab === k ? "#60a5fa" : "var(--text-secondary)",
+    transition: "all 0.15s",
+  });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
       {drilldown && <DrilldownModal title={drilldown.title} issues={drilldown.issues} onClose={closeDrilldown} />}
+      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`}</style>
 
-      {/* KPI row */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: "1rem" }}>
+      {/* Sub-tab nav */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {[
-          { label: "Active Issues",  val: total,                  color: "#60a5fa", list: active },
-          { label: "Overdue",        val: overdueIssues.length,   color: "#ef4444", list: overdueIssues },
-          { label: "Anomalies",      val: anomalyIssues.length,   color: "#f97316", list: anomalyIssues },
-          { label: "Unassigned",     val: unassignedIssues.length,color: "#38bdf8", list: unassignedIssues },
-          { label: "No Due Date",    val: noDateIssues.length,    color: "#fbbf24", list: noDateIssues },
+          { k: "summary", label: "📊 Summary" },
+          { k: "charts",  label: "📈 Charts" },
+          { k: "daily",   label: "🤖 Daily AI Snapshot" },
+          { k: "weekly",  label: "📅 Weekly Report" },
+        ].map(t => (
+          <button key={t.k} onClick={() => setSubTab(t.k as typeof subTab)} style={subTabStyle(t.k)}>{t.label}</button>
+        ))}
+      </div>
+
+      {/* KPI row — always visible */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "1rem" }}>
+        {[
+          { label: "Active",    val: total,                   color: "#60a5fa", list: active },
+          { label: "Overdue",   val: overdueIssues.length,    color: "#ef4444", list: overdueIssues },
+          { label: "WIP",       val: wipIssues.length,        color: "#a78bfa", list: wipIssues },
+          { label: "Stale 5d+", val: staleIssues.length,      color: "#f59e0b", list: staleIssues },
+          { label: "Anomalies", val: anomalyIssues.length,    color: "#f97316", list: anomalyIssues },
+          { label: "No Due Date",val: noDateIssues.length,    color: "#fbbf24", list: noDateIssues },
         ].map(k => (
           <div key={k.label} style={kpi}>
-            <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 600, letterSpacing: "0.05em" }}>{k.label}</span>
-            <span style={{ fontSize: "1.9rem", fontWeight: 800, color: k.color, lineHeight: 1 }}>
+            <span style={{ fontSize: "0.68rem", color: "var(--text-secondary)", textTransform: "uppercase", fontWeight: 700, letterSpacing: "0.05em" }}>{k.label}</span>
+            <span style={{ fontSize: "1.8rem", fontWeight: 800, color: k.color, lineHeight: 1 }}>
               <ClickCount count={k.val} color={k.color} onClick={() => openDrilldown(k.label, k.list)} />
             </span>
-            <span style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>{total > 0 ? ((k.val / total) * 100).toFixed(0) : 0}% of active</span>
+            <span style={{ fontSize: "0.68rem", color: "var(--text-secondary)" }}>{total > 0 ? ((k.val / total) * 100).toFixed(0) : 0}%</span>
           </div>
         ))}
       </div>
 
-      {/* Priority */}
-      <InsightCard title="By Priority" accent="#f97316">
-        {byPriority.map(p => (
-          <div key={p.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ width: 130, fontSize: "0.78rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>{p.label}</div>
-            <div style={{ flex: 1, height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 9999, overflow: "hidden" }}>
-              <div style={{ width: `${total > 0 ? (p.count / total) * 100 : 0}%`, height: "100%", background: p.color, borderRadius: 9999 }} />
-            </div>
-            <div style={{ width: 42, textAlign: "right", fontSize: "0.78rem", color: "var(--text-secondary)", flexShrink: 0 }}>
-              <ClickCount count={p.count} color={p.color} onClick={() => openDrilldown(`Priority: ${p.label}`, p.issues)} />
-            </div>
-          </div>
-        ))}
-      </InsightCard>
+      {/* ── SUMMARY TAB ── */}
+      {subTab === "summary" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
 
-      {/* By State */}
-      <InsightCard title="By State" accent="#60a5fa">
-        {/* Time toggle */}
-        <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
-          {(["all", "week", "month"] as const).map(t => (
-            <button key={t} onClick={() => setStateTime(t)}
-              style={{ padding: "4px 12px", borderRadius: 9999, fontSize: "0.75rem", fontWeight: 600, cursor: "pointer",
-                border: `1px solid ${stateTime === t ? "#3b82f6" : "var(--border-glass)"}`,
-                background: stateTime === t ? "rgba(59,130,246,0.15)" : "transparent",
-                color: stateTime === t ? "#60a5fa" : "var(--text-secondary)" }}>
-              {t === "all" ? "All Time" : t === "week" ? "This Week" : "This Month"}
-            </button>
-          ))}
-        </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={tblStyle}>
-            <thead>
-              <tr>
+          {/* Priority */}
+          <InsightCard title="By Priority" accent="#f97316">
+            {byPriority.map(p => (
+              <div key={p.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ width: 130, fontSize: "0.78rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0 }}>{p.label}</div>
+                <div style={{ flex: 1, height: 8, background: "rgba(255,255,255,0.06)", borderRadius: 9999, overflow: "hidden" }}>
+                  <div style={{ width: `${total > 0 ? (p.count / total) * 100 : 0}%`, height: "100%", background: p.color, borderRadius: 9999 }} />
+                </div>
+                <div style={{ width: 42, textAlign: "right", fontSize: "0.78rem", color: "var(--text-secondary)", flexShrink: 0 }}>
+                  <ClickCount count={p.count} color={p.color} onClick={() => openDrilldown(`Priority: ${p.label}`, p.issues)} />
+                </div>
+              </div>
+            ))}
+          </InsightCard>
+
+          {/* By State */}
+          <InsightCard title="By State" accent="#60a5fa">
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              {(["all","week","month"] as const).map(t => (
+                <button key={t} onClick={() => setStateTime(t)} style={{ padding: "4px 12px", borderRadius: 9999, fontSize: "0.75rem", fontWeight: 600, cursor: "pointer", border: `1px solid ${stateTime === t ? "#3b82f6" : "var(--border-glass)"}`, background: stateTime === t ? "rgba(59,130,246,0.15)" : "transparent", color: stateTime === t ? "#60a5fa" : "var(--text-secondary)" }}>
+                  {t === "all" ? "All Time" : t === "week" ? "This Week" : "This Month"}
+                </button>
+              ))}
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={tblStyle}><thead><tr>
                 <th style={thS}>State</th>
                 <th style={{ ...thS, textAlign: "right" }}>Total</th>
                 <th style={{ ...thS, textAlign: "right" }}>Overdue</th>
                 <th style={{ ...thS, textAlign: "right" }}>Done After Due</th>
-              </tr>
-            </thead>
-            <tbody>
-              {byStateEnhanced.map(s => (
-                <tr key={s.name} style={rowStyle}
-                  onMouseEnter={e => (e.currentTarget.style.background = "rgba(59,130,246,0.04)")}
-                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
-                  <td style={tdS}>
-                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.color, flexShrink: 0 }} />
-                      {s.name}
-                    </span>
-                  </td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={s.issuesTotal.length} onClick={() => openDrilldown(`State: ${s.name}`, s.issuesTotal)} />
-                  </td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={s.issuesOverdue.length} color="#ef4444" onClick={() => openDrilldown(`State: ${s.name} — Overdue`, s.issuesOverdue)} />
-                  </td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={s.issuesDoneAfterDue.length} color="#f97316" onClick={() => openDrilldown(`State: ${s.name} — Done After Due Date`, s.issuesDoneAfterDue)} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </InsightCard>
+              </tr></thead><tbody>
+                {byStateEnhanced.map(s => (
+                  <tr key={s.name} style={rowStyle} onMouseEnter={e=>(e.currentTarget.style.background="rgba(59,130,246,0.04)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+                    <td style={tdS}><span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: s.color, flexShrink: 0 }} />{s.name}</span></td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={s.issuesTotal.length} onClick={() => openDrilldown(`State: ${s.name}`, s.issuesTotal)} /></td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={s.issuesOverdue.length} color="#ef4444" onClick={() => openDrilldown(`State: ${s.name} — Overdue`, s.issuesOverdue)} /></td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={s.issuesDoneAfterDue.length} color="#f97316" onClick={() => openDrilldown(`State: ${s.name} — Done After Due`, s.issuesDoneAfterDue)} /></td>
+                  </tr>
+                ))}
+              </tbody></table>
+            </div>
+          </InsightCard>
 
-      {/* By Cycle */}
-      <InsightCard title="By Cycle" accent="#a78bfa">
-        {byCycleEnhanced.rows.length === 0
-          ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No cycle data yet — loading…</span>
-          : <div style={{ overflowX: "auto" }}>
-              <table style={tblStyle}>
-                <thead>
-                  <tr>
+          {/* By Cycle */}
+          <InsightCard title="By Cycle" accent="#a78bfa">
+            {byCycleEnhanced.rows.length === 0
+              ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No cycle data yet…</span>
+              : <div style={{ overflowX: "auto" }}>
+                  <table style={tblStyle}><thead><tr>
                     <th style={thS}>Cycle</th>
-                    <th style={{ ...thS, textAlign: "right", color: "#94a3b8" }}>End Date</th>
+                    <th style={{ ...thS, textAlign: "right" }}>End Date</th>
                     <th style={{ ...thS, textAlign: "right" }}>Total</th>
                     {byCycleEnhanced.topStates.map(s => <th key={s} style={{ ...thS, textAlign: "right" }}>{s}</th>)}
                     <th style={{ ...thS, textAlign: "right", color: "#f97316" }}>Spilled</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {byCycleEnhanced.rows.map(row => (
-                    <tr key={row.cycleName} style={rowStyle}
-                      onMouseEnter={e => (e.currentTarget.style.background = "rgba(167,139,250,0.04)")}
-                      onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
-                      <td style={{ ...tdS, fontWeight: 600, minWidth: 120, whiteSpace: "nowrap", color: row.cycleName === "(No Cycle)" ? "var(--text-secondary)" : "#c4b5fd" }}>{row.cycleName}</td>
-                      <td style={{ ...tdS, textAlign: "right", color: "var(--text-secondary)", fontSize: "0.75rem" }}>{fmt(row.end_date)}</td>
-                      <td style={{ ...tdS, textAlign: "right" }}>
-                        <ClickCount count={row.total} color="#a78bfa" onClick={() => openDrilldown(`Cycle: ${row.cycleName}`, row.allIssues)} />
-                      </td>
-                      {byCycleEnhanced.topStates.map(s => (
-                        <td key={s} style={{ ...tdS, textAlign: "right" }}>
-                          <ClickCount count={row.byState[s]?.length ?? 0} onClick={() => openDrilldown(`Cycle: ${row.cycleName} — ${s}`, row.byState[s] ?? [])} />
-                        </td>
-                      ))}
-                      <td style={{ ...tdS, textAlign: "right" }}>
-                        <ClickCount count={row.spilled.length} color="#f97316" onClick={() => openDrilldown(`Cycle: ${row.cycleName} — Spillovers`, row.spilled)} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-        }
-      </InsightCard>
+                  </tr></thead><tbody>
+                    {byCycleEnhanced.rows.map(row => (
+                      <tr key={row.cycleName} style={rowStyle} onMouseEnter={e=>(e.currentTarget.style.background="rgba(167,139,250,0.04)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+                        <td style={{ ...tdS, fontWeight: 600, minWidth: 120, whiteSpace: "nowrap", color: row.cycleName === "(No Cycle)" ? "var(--text-secondary)" : "#c4b5fd" }}>{row.cycleName}</td>
+                        <td style={{ ...tdS, textAlign: "right", color: "var(--text-secondary)", fontSize: "0.75rem" }}>{fmt(row.end_date)}</td>
+                        <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={row.total} color="#a78bfa" onClick={() => openDrilldown(`Cycle: ${row.cycleName}`, row.allIssues)} /></td>
+                        {byCycleEnhanced.topStates.map(s => <td key={s} style={{ ...tdS, textAlign: "right" }}><ClickCount count={row.byState[s]?.length ?? 0} onClick={() => openDrilldown(`Cycle: ${row.cycleName} — ${s}`, row.byState[s] ?? [])} /></td>)}
+                        <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={row.spilled.length} color="#f97316" onClick={() => openDrilldown(`Cycle: ${row.cycleName} — Spillovers`, row.spilled)} /></td>
+                      </tr>
+                    ))}
+                  </tbody></table>
+                </div>}
+          </InsightCard>
 
-      {/* By Module */}
-      <InsightCard title="By Module" accent="#34d399">
-        {byModuleEnhanced.rows.length === 0
-          ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No module data yet — loading…</span>
-          : <div style={{ overflowX: "auto" }}>
-              <table style={tblStyle}>
-                <thead>
-                  <tr>
+          {/* By Module */}
+          <InsightCard title="By Module" accent="#34d399">
+            {byModuleEnhanced.rows.length === 0
+              ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No module data yet…</span>
+              : <div style={{ overflowX: "auto" }}>
+                  <table style={tblStyle}><thead><tr>
                     <th style={thS}>Module</th>
                     <th style={{ ...thS, textAlign: "right" }}>Total</th>
                     {byModuleEnhanced.topStates.map(s => <th key={s} style={{ ...thS, textAlign: "right" }}>{s}</th>)}
-                  </tr>
-                </thead>
-                <tbody>
-                  {byModuleEnhanced.rows.map(row => (
-                    <tr key={row.modName} style={rowStyle}
-                      onMouseEnter={e => (e.currentTarget.style.background = "rgba(52,211,153,0.04)")}
-                      onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
-                      <td style={{ ...tdS, fontWeight: 600, minWidth: 140, whiteSpace: "nowrap", color: row.modName === "(No Module)" ? "var(--text-secondary)" : "#6ee7b7" }}>{row.modName}</td>
-                      <td style={{ ...tdS, textAlign: "right" }}>
-                        <ClickCount count={row.total} color="#34d399" onClick={() => openDrilldown(`Module: ${row.modName}`, row.allIssues)} />
-                      </td>
-                      {byModuleEnhanced.topStates.map(s => (
-                        <td key={s} style={{ ...tdS, textAlign: "right" }}>
-                          <ClickCount count={row.byState[s]?.length ?? 0} onClick={() => openDrilldown(`Module: ${row.modName} — ${s}`, row.byState[s] ?? [])} />
-                        </td>
+                  </tr></thead><tbody>
+                    {byModuleEnhanced.rows.map(row => (
+                      <tr key={row.modName} style={rowStyle} onMouseEnter={e=>(e.currentTarget.style.background="rgba(52,211,153,0.04)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+                        <td style={{ ...tdS, fontWeight: 600, minWidth: 140, whiteSpace: "nowrap", color: row.modName === "(No Module)" ? "var(--text-secondary)" : "#6ee7b7" }}>{row.modName}</td>
+                        <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={row.total} color="#34d399" onClick={() => openDrilldown(`Module: ${row.modName}`, row.allIssues)} /></td>
+                        {byModuleEnhanced.topStates.map(s => <td key={s} style={{ ...tdS, textAlign: "right" }}><ClickCount count={row.byState[s]?.length ?? 0} onClick={() => openDrilldown(`Module: ${row.modName} — ${s}`, row.byState[s] ?? [])} /></td>)}
+                      </tr>
+                    ))}
+                  </tbody></table>
+                </div>}
+          </InsightCard>
+
+          {/* Tags */}
+          <InsightCard title="Tags — Bug · Lender Integration · Vendor Integration" accent="#38bdf8">
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
+              {byTagEnhanced.map(t => {
+                const color = TAG_COLORS[t.tag] ?? "#60a5fa";
+                return (
+                  <div key={t.tag} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "0.85rem 1rem", display: "flex", flexDirection: "column", gap: 10 }}>
+                    <div style={{ fontSize: "0.85rem", fontWeight: 700, color }}>{t.tag}</div>
+                    <div style={{ display: "flex", gap: 14 }}>
+                      {[{ label: "Week", list: t.weekIssues },{ label: "Month", list: t.monthIssues },{ label: "All", list: t.tagIssues }].map(({ label, list }) => (
+                        <div key={label} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                          <span style={{ fontSize: "1.4rem", fontWeight: 800, color, lineHeight: 1 }}><ClickCount count={list.length} color={color} onClick={() => openDrilldown(`${t.tag} — ${label}`, list)} /></span>
+                          <span style={{ fontSize: "0.65rem", color: "var(--text-secondary)" }}>{label}</span>
+                        </div>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                    </div>
+                    <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+                      {Object.entries(t.byState).sort(([,a],[,b]) => b.count - a.count).map(([sName, { count, color: sColor, issues: sIssues }]) => (
+                        <div key={sName} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: "0.75rem", color: "var(--text-secondary)" }}>
+                            <span style={{ width: 6, height: 6, borderRadius: "50%", background: sColor, flexShrink: 0 }} />{sName}
+                          </span>
+                          <ClickCount count={count} color={color} onClick={() => openDrilldown(`${t.tag} — ${sName}`, sIssues)} />
+                        </div>
+                      ))}
+                      {Object.keys(t.byState).length === 0 && <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>No issues</span>}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-        }
-      </InsightCard>
+          </InsightCard>
 
-      {/* Tags */}
-      <InsightCard title="Tags — Bug · Lender Integration · Vendor Integration" accent="#38bdf8">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 12 }}>
-          {byTagEnhanced.map(t => {
-            const color = TAG_COLORS[t.tag] ?? "#60a5fa";
-            return (
-              <div key={t.tag} style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "0.85rem 1rem", display: "flex", flexDirection: "column", gap: 10 }}>
-                <div style={{ fontSize: "0.85rem", fontWeight: 700, color }}>{t.tag}</div>
-                {/* Week / Month / All Time */}
-                <div style={{ display: "flex", gap: 14 }}>
-                  {[
-                    { label: "Week",  list: t.weekIssues },
-                    { label: "Month", list: t.monthIssues },
-                    { label: "All",   list: t.tagIssues },
-                  ].map(({ label, list }) => (
-                    <div key={label} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                      <span style={{ fontSize: "1.4rem", fontWeight: 800, color, lineHeight: 1 }}>
-                        <ClickCount count={list.length} color={color} onClick={() => openDrilldown(`${t.tag} — This ${label}`, list)} />
-                      </span>
-                      <span style={{ fontSize: "0.65rem", color: "var(--text-secondary)" }}>{label}</span>
-                    </div>
-                  ))}
-                </div>
-                {/* State breakdown */}
-                <div style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
-                  {Object.entries(t.byState).sort(([,a],[,b]) => b.count - a.count).map(([sName, { count, color: sColor, issues: sIssues }]) => (
-                    <div key={sName} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ display: "flex", alignItems: "center", gap: 5, fontSize: "0.75rem", color: "var(--text-secondary)" }}>
-                        <span style={{ width: 6, height: 6, borderRadius: "50%", background: sColor, flexShrink: 0 }} />
-                        {sName}
-                      </span>
-                      <ClickCount count={count} color={color} onClick={() => openDrilldown(`${t.tag} — ${sName}`, sIssues)} />
-                    </div>
-                  ))}
-                  {Object.keys(t.byState).length === 0 && <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>No issues</span>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </InsightCard>
-
-      {/* By Assignee */}
-      <InsightCard title="By Assignee" accent="#38bdf8">
-        <div style={{ overflowX: "auto" }}>
-          <table style={tblStyle}>
-            <thead>
-              <tr>
+          {/* By Assignee with search */}
+          <InsightCard title="By Assignee" accent="#38bdf8">
+            <input
+              placeholder="🔍 Search assignee…"
+              value={assigneeSearch} onChange={e => setAssigneeSearch(e.target.value)}
+              style={{ marginBottom: 10, padding: "6px 12px", background: "rgba(255,255,255,0.06)", border: "1px solid var(--border-glass)", borderRadius: 8, color: "var(--text-primary)", fontSize: "0.82rem", outline: "none", width: 260 }}
+            />
+            <div style={{ overflowX: "auto" }}>
+              <table style={tblStyle}><thead><tr>
                 <th style={thS}>Assignee</th>
                 <th style={{ ...thS, textAlign: "right" }}>Total</th>
                 <th style={{ ...thS, textAlign: "right" }}>Open</th>
                 <th style={{ ...thS, textAlign: "right", color: "#ef4444" }}>Overdue</th>
                 <th style={{ ...thS, textAlign: "right", color: "#34d399" }}>Done</th>
                 <th style={{ ...thS, textAlign: "right", color: "#f97316" }}>Spillovers</th>
-              </tr>
-            </thead>
-            <tbody>
-              {byAssignee.map(a => (
-                <tr key={a.name} style={rowStyle}
-                  onMouseEnter={e => (e.currentTarget.style.background = "rgba(56,189,248,0.04)")}
-                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
-                  <td style={{ ...tdS, fontWeight: 600, minWidth: 140, whiteSpace: "nowrap", color: a.name === "(Unassigned)" ? "var(--text-secondary)" : "var(--text-primary)" }}>{a.name}</td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={a.total.length} onClick={() => openDrilldown(`${a.name} — All Issues`, a.total)} />
-                  </td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={a.open.length} color="#60a5fa" onClick={() => openDrilldown(`${a.name} — Open`, a.open)} />
-                  </td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={a.overdue.length} color="#ef4444" onClick={() => openDrilldown(`${a.name} — Overdue`, a.overdue)} />
-                  </td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={a.done.length} color="#34d399" onClick={() => openDrilldown(`${a.name} — Done`, a.done)} />
-                  </td>
-                  <td style={{ ...tdS, textAlign: "right" }}>
-                    <ClickCount count={a.spillovers.length} color="#f97316" onClick={() => openDrilldown(`${a.name} — Spillovers`, a.spillovers)} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+              </tr></thead><tbody>
+                {byAssigneeFiltered.map(a => (
+                  <tr key={a.name} style={rowStyle} onMouseEnter={e=>(e.currentTarget.style.background="rgba(56,189,248,0.04)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+                    <td style={{ ...tdS, fontWeight: 600, minWidth: 140, whiteSpace: "nowrap", color: a.name === "(Unassigned)" ? "var(--text-secondary)" : "var(--text-primary)" }}>{a.name}</td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={a.total.length} onClick={() => openDrilldown(`${a.name} — All`, a.total)} /></td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={a.open.length} color="#60a5fa" onClick={() => openDrilldown(`${a.name} — Open`, a.open)} /></td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={a.overdue.length} color="#ef4444" onClick={() => openDrilldown(`${a.name} — Overdue`, a.overdue)} /></td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={a.done.length} color="#34d399" onClick={() => openDrilldown(`${a.name} — Done`, a.done)} /></td>
+                    <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={a.spillovers.length} color="#f97316" onClick={() => openDrilldown(`${a.name} — Spillovers`, a.spillovers)} /></td>
+                  </tr>
+                ))}
+              </tbody></table>
+            </div>
+          </InsightCard>
+
+          {/* By Creator with search */}
+          <InsightCard title="By Creator" accent="#c084fc">
+            <input
+              placeholder="🔍 Search creator…"
+              value={creatorSearch} onChange={e => setCreatorSearch(e.target.value)}
+              style={{ marginBottom: 10, padding: "6px 12px", background: "rgba(255,255,255,0.06)", border: "1px solid var(--border-glass)", borderRadius: 8, color: "var(--text-primary)", fontSize: "0.82rem", outline: "none", width: 260 }}
+            />
+            <div style={{ overflowX: "auto" }}>
+              <table style={tblStyle}><thead><tr>
+                <th style={thS}>Creator</th>
+                <th style={{ ...thS, textAlign: "right" }}>Total Created</th>
+                <th style={{ ...thS, textAlign: "right" }}>Open</th>
+                <th style={{ ...thS, textAlign: "right", color: "#34d399" }}>Done</th>
+              </tr></thead><tbody>
+                {allCreators.map(c => {
+                  const done = c.issues.filter(isDone);
+                  const open = c.issues.filter(i => !isDone(i));
+                  return (
+                    <tr key={c.name} style={rowStyle} onMouseEnter={e=>(e.currentTarget.style.background="rgba(192,132,252,0.04)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+                      <td style={{ ...tdS, fontWeight: 600, minWidth: 140, whiteSpace: "nowrap" }}>{c.name}</td>
+                      <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={c.issues.length} color="#c084fc" onClick={() => openDrilldown(`Created by ${c.name}`, c.issues)} /></td>
+                      <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={open.length} color="#60a5fa" onClick={() => openDrilldown(`Created by ${c.name} — Open`, open)} /></td>
+                      <td style={{ ...tdS, textAlign: "right" }}><ClickCount count={done.length} color="#34d399" onClick={() => openDrilldown(`Created by ${c.name} — Done`, done)} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody></table>
+            </div>
+          </InsightCard>
         </div>
-      </InsightCard>
+      )}
+
+      {/* ── CHARTS TAB ── */}
+      {subTab === "charts" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+
+          {/* Created vs Resolved */}
+          <InsightCard title="Created vs Resolved — Last 8 Weeks" accent="#3b82f6">
+            <div style={{ width: "100%", height: 280 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={createdVsResolvedData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                  <XAxis dataKey="week" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
+                  <Legend wrapperStyle={{ fontSize: 12, color: "#94a3b8" }} />
+                  <Bar dataKey="Created"  fill="#3b82f6" radius={[4,4,0,0]} />
+                  <Bar dataKey="Resolved" fill="#22c55e" radius={[4,4,0,0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ display: "flex", gap: 20, marginTop: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: "0.78rem", color: "var(--text-secondary)" }}>
+                ⚡ This week: <strong style={{ color: "#3b82f6" }}>{createdThisWeek.length} created</strong> vs <strong style={{ color: "#22c55e" }}>{completedThisWeek.length} resolved</strong>
+                {createdThisWeek.length > completedThisWeek.length ? <span style={{ color: "#f59e0b", marginLeft: 6 }}>⚠ Backlog growing</span> : <span style={{ color: "#22c55e", marginLeft: 6 }}>✓ Keeping pace</span>}
+              </span>
+            </div>
+          </InsightCard>
+
+          {/* State Distribution + Priority side by side */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
+            <InsightCard title="State Distribution" accent="#8b5cf6">
+              <div style={{ width: "100%", height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={stateDonutData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value">
+                      {stateDonutData.map((entry, idx) => (
+                        <Cell key={idx} fill={entry.color || CHART_COLORS[idx % CHART_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 11, color: "#94a3b8" }} />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </InsightCard>
+
+            <InsightCard title="Priority Breakdown" accent="#f59e0b">
+              <div style={{ width: "100%", height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={priorityChartData} layout="vertical" margin={{ left: 10, right: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" horizontal={false} />
+                    <XAxis type="number" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} />
+                    <YAxis type="category" dataKey="name" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} width={65} />
+                    <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
+                    <Bar dataKey="value" radius={[0,4,4,0]}>
+                      {priorityChartData.map((entry, idx) => <Cell key={idx} fill={entry.color} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </InsightCard>
+          </div>
+
+          {/* WIP by Assignee */}
+          <InsightCard title="Work In Progress — By Assignee (Top 10)" accent="#a78bfa">
+            <div style={{ width: "100%", height: Math.max(200, wipByAssignee.length * 36 + 40) }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={wipByAssignee} layout="vertical" margin={{ left: 10, right: 30 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" horizontal={false} />
+                  <XAxis type="number" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <YAxis type="category" dataKey="name" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} width={130} />
+                  <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
+                  <Bar dataKey="value" fill="#8b5cf6" radius={[0,4,4,0]} name="WIP Issues" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </InsightCard>
+
+          {/* Cycle Time by Project */}
+          {cycleTimeByProject.length > 0 && (
+            <InsightCard title={`Cycle Time by Project — Avg ${avgCycleTimeDays.toFixed(1)} days`} accent="#10b981">
+              <div style={{ width: "100%", height: Math.max(200, cycleTimeByProject.length * 36 + 40) }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={cycleTimeByProject} layout="vertical" margin={{ left: 10, right: 30 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" horizontal={false} />
+                    <XAxis type="number" tick={{ fill: "#64748b", fontSize: 11 }} axisLine={false} tickLine={false} unit="d" />
+                    <YAxis type="category" dataKey="name" tick={{ fill: "#94a3b8", fontSize: 11 }} axisLine={false} tickLine={false} width={130} />
+                    <Tooltip formatter={(v: unknown) => [`${v} days`, "Avg Cycle Time"]} contentStyle={{ background: "#1e293b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
+                    <Bar dataKey="avg" fill="#10b981" radius={[0,4,4,0]} name="Avg days" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </InsightCard>
+          )}
+
+          {/* Stale Issues */}
+          <InsightCard title={`Stale Issues — No Updates in 5+ Days (${staleIssues.length})`} accent="#f59e0b">
+            {staleIssues.length === 0
+              ? <span style={{ color: "#22c55e", fontSize: "0.85rem" }}>✓ No stale issues — great job keeping things moving!</span>
+              : <div style={{ overflowX: "auto" }}>
+                  <table style={tblStyle}><thead><tr>
+                    <th style={thS}>Issue</th>
+                    <th style={{ ...thS, textAlign: "right" }}>Stale Days</th>
+                    <th style={thS}>State</th>
+                    <th style={thS}>Assignee</th>
+                    <th style={thS}>Project</th>
+                  </tr></thead><tbody>
+                    {staleIssues.slice(0, 20).map(i => (
+                      <tr key={i.id} style={rowStyle} onMouseEnter={e=>(e.currentTarget.style.background="rgba(245,158,11,0.04)")} onMouseLeave={e=>(e.currentTarget.style.background="transparent")}>
+                        <td style={{ ...tdS, maxWidth: 260 }}>
+                          <a href={issueUrl(i)} target="_blank" rel="noopener noreferrer" style={{ color: "#93c5fd", textDecoration: "none", fontWeight: 500 }}>{i.project_identifier}-{i.sequence_id} {i.name}</a>
+                        </td>
+                        <td style={{ ...tdS, textAlign: "right" }}>
+                          <span style={{ color: "#f59e0b", fontWeight: 700 }}>{staleDays(i)}d</span>
+                        </td>
+                        <td style={tdS}><span style={{ display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: i.state_color }} />{i.state_name}</span></td>
+                        <td style={{ ...tdS, color: "var(--text-secondary)" }}>{i.assignees[0] ?? "—"}</td>
+                        <td style={{ ...tdS, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{i.project_name}</td>
+                      </tr>
+                    ))}
+                  </tbody></table>
+                  {staleIssues.length > 20 && <div style={{ padding: "8px 10px", color: "var(--text-secondary)", fontSize: "0.75rem" }}>+{staleIssues.length - 20} more stale issues</div>}
+                </div>}
+          </InsightCard>
+        </div>
+      )}
+
+      {/* ── DAILY AI SNAPSHOT TAB ── */}
+      {subTab === "daily" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>
+              AI-generated snapshot based on current issue data · {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}
+            </span>
+            <button onClick={fetchAI} disabled={aiLoading} style={{ padding: "6px 16px", background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.25)", borderRadius: 8, color: "#60a5fa", fontSize: "0.78rem", fontWeight: 600, cursor: aiLoading ? "not-allowed" : "pointer", opacity: aiLoading ? 0.6 : 1 }}>
+              {aiLoading ? "⟳ Generating…" : "↻ Refresh"}
+            </button>
+          </div>
+
+          {aiError && <div style={{ color: "#f87171", fontSize: "0.82rem", padding: "10px 14px", background: "rgba(239,68,68,0.08)", borderRadius: 8 }}>Error: {aiError}</div>}
+
+          <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+            <AIInsightCard icon="✅" title="What's On Track" items={(aiData?.onTrack as string[]) ?? []} color="#22c55e" loading={aiLoading} />
+            <AIInsightCard icon="🚧" title="Blockers" items={(aiData?.blockers as string[]) ?? []} color="#ef4444" loading={aiLoading} />
+            <AIInsightCard icon="💡" title="Where Improvements Needed" items={(aiData?.improvements as string[]) ?? []} color="#f59e0b" loading={aiLoading} />
+          </div>
+
+          {/* Quick metrics row */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: "1rem" }}>
+            <MetricTile label="Avg Cycle Time" value={`${avgCycleTimeDays.toFixed(1)}d`} sub="from created to done" color="#10b981" />
+            <MetricTile label="WIP Count" value={wipIssues.length} sub={wipIssues.length > 30 ? "⚠ High WIP" : "Within range"} color="#8b5cf6" />
+            <MetricTile label="Stale Issues" value={staleIssues.length} sub="5+ days unchanged" color="#f59e0b" />
+            <MetricTile label="This Week Created" value={createdThisWeek.length} sub={`${completedThisWeek.length} resolved`} color="#3b82f6" />
+            <MetricTile label="Bugs This Week" value={bugsThisWeek} sub={`${bugsResolved} resolved`} color="#ef4444" />
+          </div>
+        </div>
+      )}
+
+      {/* ── WEEKLY REPORT TAB ── */}
+      {subTab === "weekly" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>
+              Week ending {new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}
+            </span>
+            <button onClick={fetchAI} disabled={aiLoading} style={{ padding: "6px 16px", background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.25)", borderRadius: 8, color: "#60a5fa", fontSize: "0.78rem", fontWeight: 600, cursor: aiLoading ? "not-allowed" : "pointer", opacity: aiLoading ? 0.6 : 1 }}>
+              {aiLoading ? "⟳ Generating…" : "↻ Refresh"}
+            </button>
+          </div>
+
+          {/* 1. Executive Summary */}
+          <InsightCard title="1 · Executive Summary" accent="#60a5fa">
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* RAG */}
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                <span style={{ fontSize: "0.82rem", color: "var(--text-secondary)", fontWeight: 600 }}>Overall Status:</span>
+                {aiLoading
+                  ? <div style={{ height: 32, width: 120, background: "rgba(255,255,255,0.06)", borderRadius: 9999, animation: "pulse 1.5s ease-in-out infinite" }} />
+                  : <RAGBadge rag={(aiData?.rag as string) ?? "amber"} label={(aiData?.ragLabel as string) ?? "Calculating…"} />}
+              </div>
+              {/* Key achievement */}
+              <div style={{ background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ fontSize: "0.72rem", color: "#60a5fa", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>🏆 Key Achievement</div>
+                {aiLoading
+                  ? <div style={{ height: 14, background: "rgba(255,255,255,0.06)", borderRadius: 7, width: "80%", animation: "pulse 1.5s ease-in-out infinite" }} />
+                  : <p style={{ margin: 0, fontSize: "0.88rem", color: "var(--text-primary)", lineHeight: 1.6 }}>{(aiData?.keyAchievement as string) ?? "—"}</p>}
+              </div>
+              {/* Top 3 risks */}
+              <div style={{ background: "rgba(239,68,68,0.05)", border: "1px solid rgba(239,68,68,0.15)", borderRadius: 10, padding: "12px 14px" }}>
+                <div style={{ fontSize: "0.72rem", color: "#ef4444", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>🔴 Top 3 Risks / Blockers</div>
+                {aiLoading
+                  ? [1,2,3].map(n => <div key={n} style={{ height: 13, background: "rgba(255,255,255,0.06)", borderRadius: 7, width: `${50+n*12}%`, marginBottom: 6, animation: "pulse 1.5s ease-in-out infinite" }} />)
+                  : <ol style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>
+                      {((aiData?.topRisks as string[]) ?? []).map((r, i) => <li key={i} style={{ fontSize: "0.83rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>{r}</li>)}
+                    </ol>}
+              </div>
+            </div>
+          </InsightCard>
+
+          {/* 2. Core Automation Metrics */}
+          <InsightCard title="2 · Core Automation Metrics" accent="#10b981">
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "1rem", marginBottom: 16 }}>
+              <MetricTile label="Created This Week" value={createdThisWeek.length} sub={`${completedThisWeek.length} resolved`} color="#3b82f6" />
+              <MetricTile label="Resolution Rate" value={createdThisWeek.length > 0 ? `${((completedThisWeek.length / createdThisWeek.length)*100).toFixed(0)}%` : "N/A"} sub={createdThisWeek.length > 0 && completedThisWeek.length >= createdThisWeek.length ? "✓ Keeping pace" : "⚠ Falling behind"} color="#10b981" />
+              <MetricTile label="Time Saved (est.)" value={`~${Math.round(completedThisWeek.length * 0.5)}h`} sub="via automated tracking" color="#8b5cf6" />
+            </div>
+            {/* Mini created vs resolved chart */}
+            <div style={{ width: "100%", height: 200 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={createdVsResolvedData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gCreated"  x1="0" y1="0" x2="0" y2="1"><stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.3}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient>
+                    <linearGradient id="gResolved" x1="0" y1="0" x2="0" y2="1"><stop offset="5%"  stopColor="#22c55e" stopOpacity={0.3}/><stop offset="95%" stopColor="#22c55e" stopOpacity={0}/></linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                  <XAxis dataKey="week" tick={{ fill: "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fill: "#64748b", fontSize: 10 }} axisLine={false} tickLine={false} />
+                  <Tooltip contentStyle={{ background: "#1e293b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }} />
+                  <Area type="monotone" dataKey="Created"  stroke="#3b82f6" fill="url(#gCreated)"  strokeWidth={2} />
+                  <Area type="monotone" dataKey="Resolved" stroke="#22c55e" fill="url(#gResolved)" strokeWidth={2} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </InsightCard>
+
+          {/* 3. Workflow Performance */}
+          <InsightCard title="3 · Workflow Performance (Flow Analysis)" accent="#a78bfa">
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "1rem" }}>
+              <MetricTile label="Cycle Time" value={`${avgCycleTimeDays.toFixed(1)}d`} sub="avg In Progress → Done" color="#10b981" />
+              <MetricTile label="Work In Progress" value={wipIssues.length} sub={wipIssues.length > 30 ? "High — potential bottleneck" : "Healthy WIP level"} color={wipIssues.length > 30 ? "#ef4444" : "#8b5cf6"} />
+              <MetricTile label="Stale Tickets" value={staleIssues.length} sub={`${issues.length > 0 ? ((staleIssues.length/issues.length)*100).toFixed(0) : 0}% of all issues`} color={staleIssues.length > 20 ? "#ef4444" : "#f59e0b"} />
+            </div>
+          </InsightCard>
+
+          {/* 4. Task Breakdown */}
+          <InsightCard title="4 · Task Breakdown" accent="#f59e0b">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1.5rem" }}>
+              {/* Accomplished */}
+              <div>
+                <div style={{ fontSize: "0.75rem", color: "#22c55e", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>✅ Accomplished This Week</div>
+                {completedThisWeek.length === 0
+                  ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No completions this week</span>
+                  : <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 7 }}>
+                      {completedThisWeek.slice(0, 8).map(i => (
+                        <li key={i.id} style={{ display: "flex", gap: 7, fontSize: "0.8rem" }}>
+                          <span style={{ color: "#22c55e", flexShrink: 0 }}>✓</span>
+                          <a href={issueUrl(i)} target="_blank" rel="noopener noreferrer" style={{ color: "var(--text-secondary)", textDecoration: "none", lineHeight: 1.4 }}
+                            onMouseEnter={e=>(e.currentTarget.style.color="#93c5fd")} onMouseLeave={e=>(e.currentTarget.style.color="var(--text-secondary)")}>
+                            <strong>{i.project_identifier}-{i.sequence_id}</strong> {i.name}
+                          </a>
+                        </li>
+                      ))}
+                      {completedThisWeek.length > 8 && <li style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>+{completedThisWeek.length - 8} more</li>}
+                    </ul>}
+              </div>
+              {/* Upcoming */}
+              <div>
+                <div style={{ fontSize: "0.75rem", color: "#f59e0b", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>📅 Upcoming Priorities (Next 7 Days)</div>
+                {(() => {
+                  const nextWeek = new Date(today.getTime() + 7*86400000);
+                  const upcoming = issues.filter(i => !isDone(i) && i.due_date && new Date(i.due_date) >= today && new Date(i.due_date) <= nextWeek).sort((a,b) => (a.due_date ?? "").localeCompare(b.due_date ?? "")).slice(0, 8);
+                  return upcoming.length === 0
+                    ? <span style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>No issues due in the next 7 days</span>
+                    : <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 7 }}>
+                        {upcoming.map(i => (
+                          <li key={i.id} style={{ display: "flex", gap: 7, fontSize: "0.8rem", alignItems: "flex-start" }}>
+                            <span style={{ color: "#f59e0b", flexShrink: 0, fontSize: "0.7rem", marginTop: 2 }}>{fmt(i.due_date)}</span>
+                            <a href={issueUrl(i)} target="_blank" rel="noopener noreferrer" style={{ color: "var(--text-secondary)", textDecoration: "none", lineHeight: 1.4 }}
+                              onMouseEnter={e=>(e.currentTarget.style.color="#93c5fd")} onMouseLeave={e=>(e.currentTarget.style.color="var(--text-secondary)")}>
+                              <strong>{i.project_identifier}-{i.sequence_id}</strong> {i.name}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>;
+                })()}
+              </div>
+            </div>
+
+            {/* Bugs moment */}
+            <div style={{ marginTop: 16, background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.15)", borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ fontSize: "0.72rem", color: "#ef4444", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>🐛 Bugs Moment</div>
+              <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 8 }}>
+                <MetricTile label="Bugs This Week" value={bugsThisWeek} sub="newly reported" color="#ef4444" />
+                <MetricTile label="Bugs Resolved" value={bugsResolved} sub="this week" color="#22c55e" />
+                <MetricTile label="Total Open Bugs" value={bugIssues.filter(i => !isDone(i)).length} sub="all time" color="#f97316" />
+              </div>
+              {aiLoading
+                ? <div style={{ height: 13, background: "rgba(255,255,255,0.06)", borderRadius: 7, width: "60%", animation: "pulse 1.5s ease-in-out infinite" }} />
+                : <p style={{ margin: 0, fontSize: "0.83rem", color: "var(--text-secondary)" }}>{(aiData?.bugsMoment as string) ?? `${bugsThisWeek} bugs reported, ${bugsResolved} resolved this week.`}</p>}
+            </div>
+          </InsightCard>
+        </div>
+      )}
     </div>
   );
 }

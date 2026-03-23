@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useRef } from "react";
+import { useSession, signOut } from "next-auth/react";
 
 interface Issue {
   id: string;
@@ -1007,6 +1008,7 @@ function AnomalyTab({ issues }: { issues: Issue[] }) {
 
 // ── Main page ─────────────────────────────────────────────────────────────
 export default function PlaneDashboard() {
+  const { data: session } = useSession();
   const [issues, setIssues] = useState<Issue[]>([]);
   const [filterOptions, setFilterOptions] = useState<FilterOptions | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1107,9 +1109,22 @@ export default function PlaneDashboard() {
   return (
     <main style={{ padding: "2rem", minHeight: "100vh" }}>
       <div style={{ marginBottom: "1.75rem" }}>
-        <h1 style={{ fontSize: "1.8rem", fontWeight: 800, background: "linear-gradient(to right, #60a5fa, #c084fc)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text", marginBottom: 4 }}>
-          Nirmaan
-        </h1>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 4 }}>
+          <h1 style={{ fontSize: "1.8rem", fontWeight: 800, background: "linear-gradient(to right, #60a5fa, #c084fc)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text", margin: 0 }}>
+            Nirmaan
+          </h1>
+          {session?.user && (
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>{session.user.email}</span>
+              <button
+                onClick={() => signOut({ callbackUrl: "/login" })}
+                style={{ padding: "5px 12px", background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 8, color: "#f87171", fontSize: "0.78rem", fontWeight: 600, cursor: "pointer" }}
+              >
+                Sign out
+              </button>
+            </div>
+          )}
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem", margin: 0 }}>
             Workspace: cr-product &middot; {loading ? "Loading..." : `${issues.length} total issues`}

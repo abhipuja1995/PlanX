@@ -222,20 +222,16 @@ export async function GET(req: Request) {
       const { promises: dns } = await import("dns");
       const smtpHost = process.env.SMTP_HOST ?? "smtp.gmail.com";
       const smtpPort = Number(process.env.SMTP_PORT ?? 465);
-      const smtpSecure = process.env.SMTP_SECURE !== "false"; // default true for port 465
+      const smtpSecure = process.env.SMTP_SECURE !== "false";
 
-      // Resolve to IPv4 explicitly so Railway doesn't pick an unreachable IPv6 address
       const { address: smtpIp } = await dns.lookup(smtpHost, { family: 4 });
 
-      const transporter = nodemailer.createTransport({
+      const makeTransporter = () => nodemailer.createTransport({
         host:   smtpIp,
         port:   smtpPort,
         secure: smtpSecure,
         auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
         tls:    { servername: smtpHost },
-        pool:            true,   // reuse single SMTP connection for all sends
-        maxConnections:  1,
-        maxMessages:     200,
         connectionTimeout: 30000,
         socketTimeout:     60000,
         greetingTimeout:   30000,
@@ -243,7 +239,10 @@ export async function GET(req: Request) {
 
       const from = process.env.SMTP_FROM ?? `Nirmaan <${process.env.SMTP_USER}>`;
 
-      // Overdue emails
+      // Build all mail jobs upfront
+      type MailJob = { to: string; subject: string; html: string; label: string };
+      const jobs: MailJob[] = [];
+
       for (const [, { email, name, issues }] of Object.entries(overdueByAssignee)) {
         const sorted = [...issues].sort((a, b) => b._days - a._days);
         const rows = sorted.map(i => overdueRow(i, i._days)).join("");
@@ -251,8 +250,7 @@ export async function GET(req: Request) {
         const urgentCount = issues.filter(i => (i.priority === "urgent" || i.priority === "high")).length;
         const urgentNote = urgentCount > 0 ? `, including ${urgentCount} high-priority` : "";
         const recipient = testTo ?? email;
-        await transporter.sendMail({
-          from,
+        jobs.push({
           to: recipient,
           subject: `🚨 Action Required: ${issues.length} Overdue Issue${issues.length !== 1 ? "s" : ""} Assigned to You${urgentCount > 0 ? ` (${urgentCount} High Priority)` : ""} — ${dateStr}`,
           html: buildHtml({
@@ -262,11 +260,10 @@ export async function GET(req: Request) {
             columns: ["Issue", "State", "Priority", "Due Date", "Project"],
             rows,
           }),
+          label: `overdue → ${recipient}${testTo ? ` [actual: ${email}]` : ""} (${issues.length} issues)`,
         });
-        sent.push(`overdue → ${recipient}${testTo ? ` [actual: ${email}]` : ""} (${issues.length} issues)`);
       }
 
-      // Anomaly emails
       for (const [, { email, name, issues }] of Object.entries(anomalyByCreator)) {
         const rows = issues.map(i => anomalyRow(i)).join("");
         const bulletList = issueBulletList(issues, i => i.anomalies.join(", "));
@@ -277,8 +274,7 @@ export async function GET(req: Request) {
         if (unassigned) parts.push(`${unassigned} unassigned`);
         const detail = parts.length ? ` (${parts.join(", ")})` : "";
         const recipient = testTo ?? email;
-        await transporter.sendMail({
-          from,
+        jobs.push({
           to: recipient,
           subject: `⚠️ Escalation: ${issues.length} Issue${issues.length !== 1 ? "s" : ""} You Created Have Incomplete Data${detail ? " — Fix Needed" : ""} — ${dateStr}`,
           html: buildHtml({
@@ -288,10 +284,19 @@ export async function GET(req: Request) {
             columns: ["Issue", "State", "Missing Fields", "Due Date", "Project"],
             rows,
           }),
+          label: `anomaly → ${recipient}${testTo ? ` [actual: ${email}]` : ""} (${issues.length} issues)`,
         });
-        sent.push(`anomaly → ${recipient}${testTo ? ` [actual: ${email}]` : ""} (${issues.length} issues)`);
       }
-      transporter.close(); // release pooled connection
+
+      // Send in batches of 5, fresh transporter per batch to avoid socket timeouts
+      const BATCH = 5;
+      for (let i = 0; i < jobs.length; i += BATCH) {
+        const batch = jobs.slice(i, i + BATCH);
+        const t = makeTransporter();
+        await Promise.all(batch.map(j => t.sendMail({ from, to: j.to, subject: j.subject, html: j.html })));
+        t.close();
+        batch.forEach(j => sent.push(j.label));
+      }
     } else {
       // Dry run — return what would be sent
       for (const [id, { email, name, issues }] of Object.entries(overdueByAssignee)) {

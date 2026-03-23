@@ -218,26 +218,9 @@ export async function GET(req: Request) {
     const preview: any[] = [];
 
     if (!dryRun) {
-      const nodemailer = (await import("nodemailer")).default;
-      const { promises: dns } = await import("dns");
-      const smtpHost = process.env.SMTP_HOST ?? "smtp.gmail.com";
-      const smtpPort = Number(process.env.SMTP_PORT ?? 465);
-      const smtpSecure = process.env.SMTP_SECURE !== "false";
-
-      const { address: smtpIp } = await dns.lookup(smtpHost, { family: 4 });
-
-      const makeTransporter = () => nodemailer.createTransport({
-        host:   smtpIp,
-        port:   smtpPort,
-        secure: smtpSecure,
-        auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-        tls:    { servername: smtpHost },
-        connectionTimeout: 30000,
-        socketTimeout:     60000,
-        greetingTimeout:   30000,
-      });
-
-      const from = process.env.SMTP_FROM ?? `Nirmaan <${process.env.SMTP_USER}>`;
+      const { Resend } = await import("resend");
+      const resend = new Resend(process.env.RESEND_API_KEY!);
+      const from = process.env.SMTP_FROM ?? "Nirmaan <nirmaan@credresolve.com>";
 
       // Build all mail jobs upfront
       type MailJob = { to: string; subject: string; html: string; label: string };
@@ -288,24 +271,21 @@ export async function GET(req: Request) {
         });
       }
 
-      // Return HTTP response immediately — send emails in background over ~30 min
-      const SPREAD_MS = Math.max(5000, Math.floor((28 * 60 * 1000) / jobs.length)); // spread evenly across 28 min
+      // Send via Resend HTTP API — no SMTP, no port issues
       setImmediate(async () => {
         for (const job of jobs) {
           try {
-            const t = makeTransporter();
-            await t.sendMail({ from, to: job.to, subject: job.subject, html: job.html });
-            t.close();
+            await resend.emails.send({ from, to: job.to, subject: job.subject, html: job.html });
             console.log(`[mailer] sent: ${job.label}`);
           } catch (err: any) {
             console.error(`[mailer] failed: ${job.label} —`, err.message);
           }
-          await new Promise(r => setTimeout(r, SPREAD_MS));
+          await new Promise(r => setTimeout(r, 1000)); // 1s gap — stay within Resend rate limits
         }
         console.log(`[mailer] all ${jobs.length} jobs complete`);
       });
 
-      sent.push(...jobs.map(j => j.label)); // return labels immediately for visibility
+      sent.push(...jobs.map(j => j.label)); // return labels immediately
     } else {
       // Dry run — return what would be sent
       for (const [id, { email, name, issues }] of Object.entries(overdueByAssignee)) {

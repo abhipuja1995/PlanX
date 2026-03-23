@@ -233,8 +233,12 @@ export async function GET(req: Request) {
         secure: smtpSecure,
         auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
         tls:    { servername: smtpHost },
-        connectionTimeout: 20000,
-        socketTimeout:     20000,
+        pool:            true,   // reuse single SMTP connection for all sends
+        maxConnections:  1,
+        maxMessages:     200,
+        connectionTimeout: 30000,
+        socketTimeout:     60000,
+        greetingTimeout:   30000,
       });
 
       const from = process.env.SMTP_FROM ?? `Nirmaan <${process.env.SMTP_USER}>`;
@@ -287,6 +291,7 @@ export async function GET(req: Request) {
         });
         sent.push(`anomaly → ${recipient}${testTo ? ` [actual: ${email}]` : ""} (${issues.length} issues)`);
       }
+      transporter.close(); // release pooled connection
     } else {
       // Dry run — return what would be sent
       for (const [id, { email, name, issues }] of Object.entries(overdueByAssignee)) {

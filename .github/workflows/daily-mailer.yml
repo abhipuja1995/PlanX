@@ -1,0 +1,71 @@
+name: Nirmaan Daily Digest Mailer
+
+on:
+  schedule:
+    # 8:00 AM IST = 2:30 AM UTC (IST is UTC+5:30)
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    # Allow manual trigger from GitHub Actions UI
+
+jobs:
+  send-digest:
+    name: Send Daily Digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Trigger Mailer Endpoint
+        id: mailer
+        run: |
+          echo "🕗 Firing daily digest at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            "https://planx-production.up.railway.app/api/mailer?secret=${{ secrets.MAILER_SECRET }}")
+
+          HTTP_BODY=$(echo "$RESPONSE" | head -n -1)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Response: $HTTP_BODY"
+
+          # Extract key metrics from JSON
+          OK=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('ok',''))" 2>/dev/null || echo "")
+          OVERDUE=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('overdueEmailsQueued',0))" 2>/dev/null || echo "?")
+          ANOMALY=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('anomalyEmailsQueued',0))" 2>/dev/null || echo "?")
+          MEMBERS=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('memberCount',0))" 2>/dev/null || echo "?")
+          ERR=$(echo "$HTTP_BODY" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('error',''))" 2>/dev/null || echo "")
+
+          echo "overdue=$OVERDUE" >> $GITHUB_OUTPUT
+          echo "anomaly=$ANOMALY" >> $GITHUB_OUTPUT
+          echo "members=$MEMBERS" >> $GITHUB_OUTPUT
+          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+
+          # Fail the job if HTTP error or API returned an error
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "❌ ERROR: HTTP $HTTP_CODE"
+            echo "$HTTP_BODY"
+            exit 1
+          fi
+
+          if [ "$OK" != "True" ] && [ "$OK" != "true" ] && [ -n "$ERR" ]; then
+            echo "❌ API ERROR: $ERR"
+            exit 1
+          fi
+
+          echo "✅ Digest sent successfully!"
+          echo "   Members: $MEMBERS"
+          echo "   Overdue emails: $OVERDUE"
+          echo "   Anomaly emails: $ANOMALY"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### 📧 Nirmaan Daily Digest" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status == 'success' && '✅ Sent' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Members | ${{ steps.mailer.outputs.members }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Overdue Emails | ${{ steps.mailer.outputs.overdue }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Anomaly Emails | ${{ steps.mailer.outputs.anomaly }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| HTTP Status | ${{ steps.mailer.outputs.http_code }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Run Time | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY

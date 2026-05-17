@@ -1,8 +1,21 @@
 # Pricing Engine — Technical Design
 **Project:** Nirmaan CE (PlanX)  
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** 2026-05-17  
-**Status:** Design Phase
+**Status:** Design Phase — Updated from live deployment audit
+
+---
+
+## Changelog (v1.0 → v1.1)
+
+| # | Change | Source |
+|---|---|---|
+| 1 | Supabase already connected — env vars `CE_SUPABASE_URL` + `CE_SUPABASE_SERVICE_ROLE_KEY` exist in production | Vercel env audit |
+| 2 | Use `CE_` prefix for all Supabase env vars (not `NEXT_PUBLIC_SUPABASE_*`) | Vercel env audit |
+| 3 | Anthropic Claude available (`ANTHROPIC_API_KEY`) — replace xAI for pricing insights | Vercel env audit |
+| 4 | WhatsApp notifications available via Green API (`GREEN_API_TOKEN`, `GREEN_API_INSTANCE`, `WA_BUG_GROUP_ID`) | Vercel env audit |
+| 5 | SMTP mailer already built (`/api/mailer`) — reuse for approval email notifications | Existing code |
+| 6 | Phase 1 updated — Supabase client setup only (credentials exist, no fresh project needed) | Vercel env audit |
 
 ---
 
@@ -10,9 +23,17 @@
 
 The Pricing Engine is a new module within PlanX that enables the sales team to configure channel/volume-based quotes, calculates commercials dynamically, enforces margin protection, and generates client-shareable PDF proposals.
 
-### Stack Additions
-PlanX currently uses: Next.js 14 · NextAuth (Google) · Plane API · xAI
-The Pricing Engine adds: **Supabase** (database + RLS) · **@react-pdf/renderer** (PDF generation)
+### Current Stack (Live)
+```
+Next.js 14 · NextAuth (Google, @credresolve.com only) · Plane API · xAI Grok · 
+Supabase (connected, CE_ prefix) · Anthropic Claude · Green API (WhatsApp) · SMTP Mailer
+```
+
+### Stack Additions for Pricing Engine
+```
+@react-pdf/renderer (PDF generation) · zod (schema validation)
+```
+Supabase and Claude are **already wired in production** — no new service setup required.
 
 ---
 
@@ -44,9 +65,20 @@ create table user_roles (
 ```
 
 **NextAuth session extension** (`lib/auth.ts`):
-- On session callback, fetch role from `user_roles` by email
+- On session callback, fetch role from `user_roles` by email using service role client
 - Attach `role` to session token
 - Gates on role enforced via middleware + API route checks
+
+**Supabase client setup** (`lib/supabase.ts`):
+```ts
+import { createClient } from '@supabase/supabase-js';
+
+// Server-side only (API routes) — uses service role key, bypasses RLS
+export const supabaseAdmin = createClient(
+  process.env.CE_SUPABASE_URL!,
+  process.env.CE_SUPABASE_SERVICE_ROLE_KEY!
+);
+```
 
 **Vendor visibility rule:**
 ```
@@ -114,7 +146,7 @@ create table quote_channels (
   monthly_minutes         int,
   traffic_distribution    jsonb,                 -- {peak: 40, off_peak: 60}
   commitment_volume       int,
-  discount_at_channel     numeric(5,2) default 0, -- channel-level discount %
+  discount_at_channel     numeric(5,2) default 0,
   sort_order              int default 0
 );
 
@@ -227,9 +259,7 @@ create policy "vendor_pricing_read_restricted" on vendor_pricing
     )
   );
 
--- quote_pricing: lowest_vendor_cost, avg_vendor_cost hidden from sales
--- Sales can read quote_pricing but vendor cost columns returned as null at API layer (not RLS)
--- RLS allows all authenticated credresolve.com users to read quotes they created or are approving
+-- Quotes: creator or elevated role can access
 alter table quotes enable row level security;
 create policy "quotes_access" on quotes
   for all using (
@@ -241,6 +271,8 @@ create policy "quotes_access" on quotes
     )
   );
 ```
+
+Note: All API routes use `supabaseAdmin` (service role) and enforce access control at the application layer. RLS is a safety net, not the primary access control mechanism.
 
 ---
 
@@ -259,20 +291,20 @@ INPUTS:
 CALCULATION FLOW:
 
 Step 1 — Fetch vendor costs for selected config
-  vendorCosts = query vendor_pricing matching channel config
-  lowestCost  = MIN(vendorCosts.cost_per_unit)
-  avgCost     = AVG(vendorCosts.cost_per_unit)
+  vendorCosts   = query vendor_pricing matching channel config
+  lowestCost    = MIN(vendorCosts.cost_per_unit)
+  avgCost       = AVG(vendorCosts.cost_per_unit)
   preferredCost = cost of vendor where is_preferred = true
 
 Step 2 — Fetch pricing config thresholds
-  targetMargin   = pricing_config['target_margin_pct']
-  minimumMargin  = pricing_config['minimum_margin_pct']
-  maxDiscount    = pricing_config['max_discount_pct']
+  targetMargin  = pricing_config['target_margin_pct']
+  minimumMargin = pricing_config['minimum_margin_pct']
+  maxDiscount   = pricing_config['max_discount_pct']
 
 Step 3 — Calculate price benchmarks
-  basePrice     = lowestCost / (1 - targetMargin/100)
-  floorPrice    = lowestCost / (1 - minimumMargin/100)
-  suggestedPrice = basePrice  (recommended starting point)
+  basePrice      = lowestCost / (1 - targetMargin/100)
+  floorPrice     = lowestCost / (1 - minimumMargin/100)
+  suggestedPrice = basePrice
 
 Step 4 — Apply channel-level discounts
   channelDiscount = weighted avg of per-channel discounts
@@ -282,13 +314,13 @@ Step 5 — Apply manual discount
   discountedPrice = adjustedInput * (1 - manualDiscount/100)
 
 Step 6 — Calculate margin & profitability
-  grossProfit   = discountedPrice - lowestCost
+  grossProfit    = discountedPrice - lowestCost
   grossMarginPct = (grossProfit / discountedPrice) * 100
-  
+
   profitStatus:
-    grossMarginPct >= healthyMargin  → 'healthy'   (GREEN)
+    grossMarginPct >= healthyMargin  → 'healthy'      (GREEN)
     grossMarginPct >= minimumMargin  → 'near_minimum' (AMBER)
-    grossMarginPct < minimumMargin   → 'loss'      (RED)
+    grossMarginPct <  minimumMargin  → 'loss'         (RED)
 
 Step 7 — Approval check
   approvalRequired = (
@@ -299,23 +331,51 @@ Step 7 — Approval check
   )
 
 Step 8 — Discount recommendation
-  availableBuffer = salesInputPrice - basePrice
+  availableBuffer = salesInputPrice - floorPrice
   if availableBuffer > 0:
     recommendedAdditionalDiscount = calculateIncrementalDiscount(
       buffer, commitment_months, volume, product_mix
     )
   else:
     recommendedAdditionalDiscount = 0
-    
-  Incremental discount factors:
+
+  Incremental discount factors (additive):
     commitment >= 24 months → +2%
     commitment >= 12 months → +1%
     volume > 100 channels   → +1.5%
     has premium addons      → +0.5%
-    strategic account       → +1% (manual flag)
+    strategic account flag  → +1%
 ```
 
-### 4.2 Discount Recommendation Rules
+### 4.2 Claude-Powered Pricing Insight (NEW in v1.1)
+
+The existing `ANTHROPIC_API_KEY` enables Claude to provide a natural-language pricing recommendation alongside the numeric output.
+
+```ts
+// lib/pricing-insight.ts
+import Anthropic from '@anthropic-ai/sdk';
+
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+export async function getPricingInsight(pricingResult: PricingResult): Promise<string> {
+  const msg = await client.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 300,
+    messages: [{
+      role: 'user',
+      content: `You are a pricing advisor. Given this quote data, provide a 2-3 sentence recommendation
+      focused on: win probability, margin sustainability, and one negotiation tip.
+      Data: ${JSON.stringify(pricingResult)}
+      Respond in plain text, no markdown.`
+    }]
+  });
+  return (msg.content[0] as { text: string }).text;
+}
+```
+
+This replaces the planned xAI call for insights. Shown on the Pricing & Finalise screen below the margin indicators.
+
+### 4.3 Discount Recommendation Rules
 
 ```
 NEVER suggest full available buffer as discount upfront.
@@ -324,12 +384,12 @@ Recommend in steps:
   buffer = salesInputPrice - floorPrice
   step1  = buffer * 0.30   (safe first offer)
   step2  = buffer * 0.20   (if needed, second offer)
-  
-  Additional multipliers (additive, capped at maxDiscount):
+
+  Multipliers (additive, capped at maxDiscount):
     +1%   per 6 months commitment beyond 12
     +0.5% per 50 channels volume beyond 50
     +0.5% if recording + analytics both selected
-  
+
   Output: "Recommended Additional Discount: X.X%"
   (Never auto-apply. Sales must manually enter.)
 ```
@@ -359,54 +419,91 @@ Recommend in steps:
   GET/POST/PUT — manage add-ons
 
 /api/pricing/quotes/[id]/calculate
-  POST    — run pricing engine, store result in quote_pricing
-  Response (sales role — vendor costs redacted):
-    { basePrice, floorPrice, suggestedPrice, salesInputPrice,
-      grossMarginPct, grossProfit, profitStatus, approvalRequired,
-      recommendedAdditionalDiscount, colorIndicator }
-  Response (finance/admin — full):
-    + lowestVendorCost, avgVendorCost, preferredVendorCost
+  POST    — run pricing engine, store result in quote_pricing, return insight from Claude
+  Response (sales/manager — vendor costs redacted):
+    { basePrice, suggestedPrice, salesInputPrice, grossMarginPct,
+      grossProfit, profitStatus, colorIndicator, approvalRequired,
+      recommendedAdditionalDiscount, pricingInsight }
+  Response (finance/admin/super_admin — full):
+    + lowestVendorCost, avgVendorCost, preferredVendorCost, floorPrice
 
 /api/pricing/quotes/[id]/submit
   POST    — submit for approval (creates approval_request if required)
+           triggers WhatsApp + email notifications to approvers
 
 /api/pricing/quotes/[id]/approve
   POST    — approve/reject/revise (manager/finance/admin only)
+           triggers WhatsApp + email notification to quote creator
 
 /api/pricing/quotes/[id]/pdf
-  GET     — generate & return client-facing PDF (no vendor data)
+  GET     — generate & return client-facing PDF (vendor data excluded)
 
 /api/pricing/vendors
-  GET/POST/PATCH — admin/finance only
+  GET/POST/PATCH — finance/admin only
 
 /api/pricing/config
-  GET     — admin only: pricing thresholds
-  PATCH   — admin only: update thresholds
+  GET/PATCH — admin/super_admin only
 
 /api/pricing/audit
   GET     — paginated audit log (admin/finance only)
 ```
 
-### 5.2 Vendor Cost Redaction Middleware
-
-All `/api/pricing/quotes/*/calculate` responses must strip vendor cost fields for `sales` and `manager` roles:
+### 5.2 Vendor Cost Redaction
 
 ```ts
-const REDACTED_FIELDS = ['lowestVendorCost', 'avgVendorCost', 'preferredVendorCost'];
+const VENDOR_FIELDS = ['lowestVendorCost', 'avgVendorCost', 'preferredVendorCost', 'floorPrice'];
 
 function redactForRole(data: PricingResult, role: string) {
   if (['finance', 'admin', 'super_admin'].includes(role)) return data;
   return Object.fromEntries(
-    Object.entries(data).filter(([k]) => !REDACTED_FIELDS.includes(k))
+    Object.entries(data).filter(([k]) => !VENDOR_FIELDS.includes(k))
   );
 }
 ```
 
 ---
 
-## 6. UI — New Screens
+## 6. Notification System (UPDATED in v1.1)
 
-### 6.1 Route Structure (Next.js App Router)
+Both notification channels are **already live in production** — no new setup required.
+
+### 6.1 WhatsApp (Green API) — Primary
+
+Reuse the existing Green API integration (`GREEN_API_TOKEN`, `GREEN_API_INSTANCE`).
+
+**Approval request notification to approver:**
+```
+🔔 *Approval Required*
+Quote: NRM-2026-0042
+Customer: Acme Corp
+Sales: john@credresolve.com
+Margin: 18.2% 🟡
+Reason: Discount exceeds permissible limit
+→ Review: https://planx-psi.vercel.app/pricing/NRM-2026-0042/approval
+```
+
+**Approval outcome notification to sales:**
+```
+✅ *Quote Approved*   /   ❌ *Quote Rejected*   /   🔄 *Revision Requested*
+Quote: NRM-2026-0042
+Reviewed by: manager@credresolve.com
+Remarks: [remarks text]
+```
+
+### 6.2 Email (SMTP) — Secondary
+
+Reuse existing `/api/mailer` route for email fallback and formal record.
+
+**Trigger points:**
+- Quote submitted for approval → email to approver group
+- Approval action taken → email to quote creator
+- PDF generated → email with PDF attachment (optional)
+
+---
+
+## 7. UI — New Screens
+
+### 7.1 Route Structure (Next.js App Router)
 
 ```
 app/
@@ -426,7 +523,7 @@ app/
         page.tsx                — Approval screen (manager view)
 ```
 
-### 6.2 Channel & Volume Screen
+### 7.2 Channel & Volume Screen
 
 Fields per channel row:
 - Channel Type (Inbound / Outbound / Blended) — dropdown
@@ -434,18 +531,18 @@ Fields per channel row:
 - Concurrent Channels — number input
 - Avg Call Duration (sec) — shown only for Pulse
 - Monthly Minutes Commitment — number input
-- Traffic Distribution (Peak % / Off-Peak %) — two sliders summing to 100
+- Traffic Distribution (Peak % / Off-Peak %) — sliders summing to 100
 - Channel-level Discount % — number input
 - Commercial Commitment Period — dropdown (1/3/6/12/24/36 months)
 
-Add-ons section (checkboxes + quantity):
+Add-ons (checkboxes + quantity):
 - Agentic Voice
 - AI Services
 - Call Recording
 - Analytics Dashboard
 - Custom (free text + price)
 
-### 6.3 Pricing & Finalise Screen
+### 7.3 Pricing & Finalise Screen
 
 **Visible to all roles:**
 
@@ -461,6 +558,7 @@ Add-ons section (checkboxes + quantity):
 | Profit Status | 🟢 / 🟡 / 🔴 |
 | Approval Required | Yes / No |
 | Recommended Add'l Discount | X.X% (if available) |
+| Claude Pricing Insight | [2-3 sentence recommendation] ← NEW |
 
 **Visible only to finance/admin/super_admin:**
 
@@ -472,26 +570,26 @@ Add-ons section (checkboxes + quantity):
 
 **Vendor Name: never displayed on any screen.**
 
-### 6.4 Approval Screen
+### 7.4 Approval Screen
 
 Displays to approver:
 - Quote summary
 - Expected Margin %
 - Revenue Impact (MRC + ACV)
 - Discount Justification (entered by sales at submission)
-- Profitability Status (color)
+- Profitability Status (color indicator)
 - Vendor Benchmark Cost (finance/admin only)
 - Action buttons: Approve / Reject / Request Revision
 
 ---
 
-## 7. PDF Generation
+## 8. PDF Generation
 
-### 7.1 Library
+### 8.1 Library
 
-Use `@react-pdf/renderer` — renders React components to PDF server-side, no headless browser needed.
+`@react-pdf/renderer` — renders React components to PDF server-side.
 
-### 7.2 PDF Structure
+### 8.2 PDF Structure
 
 ```
 Page 1 — Cover
@@ -512,52 +610,50 @@ Page 3 — Pricing Summary
   Taxes (GST 18% if applicable)
 
 Page 4 — Terms
-  Commercial Validity
-  Payment Terms
-  SLA Commitments
-  Exclusions
-  Terms & Conditions
+  Commercial Validity | Payment Terms | SLA Commitments
+  Exclusions | Terms & Conditions
 
 Footer (all pages): Confidential — Not for distribution
 ```
 
-### 7.3 What is Explicitly Excluded from PDF
+### 8.3 Explicitly Excluded from PDF
 
-- Vendor names
-- Vendor costs (lowest/average/preferred)
-- Internal margin %
-- Floor price
-- Approval notes / workflow status
-- Internal pricing logic or calculation steps
+- Vendor names and vendor costs
+- Internal margin % and floor price
+- Approval workflow status and notes
+- Claude pricing insights (internal)
+- Internal pricing logic
 
 ---
 
-## 8. Approval Workflow State Machine
+## 9. Approval Workflow State Machine
 
 ```
                   [Sales submits]
                        │
               ┌────────▼────────┐
-              │  pending_approval │  ← approval_required = true
+              │ pending_approval │  ← approval_required = true
               └────────┬────────┘
+           WhatsApp + Email sent to approvers
                        │
           ┌────────────┼────────────┐
           │            │            │
     ┌─────▼─────┐  ┌───▼───┐  ┌────▼──────────────┐
     │ approved  │  │rejected│  │revision_requested  │
     └─────┬─────┘  └───────┘  └────────┬───────────┘
+  WA+Email to sales               WA+Email to sales
           │                            │
     ┌─────▼──────┐              [Sales edits & resubmits]
     │ finalized  │                     │
     └────────────┘              [back to pending_approval]
 
 If approval_required = false:
-  submit → finalized directly (no approval_request created)
+  submit → finalized directly (no approval_request, no notifications)
 ```
 
 **Approval Triggers:**
 
-| Condition | Trigger |
+| Condition | Trigger Key |
 |---|---|
 | `discountedPrice < floorPrice` | `below_floor` |
 | `grossMarginPct < minimumMargin` | `below_margin_threshold` |
@@ -566,12 +662,10 @@ If approval_required = false:
 
 ---
 
-## 9. Audit & Governance
-
-Every state change, price edit, and PDF generation writes to `audit_logs`:
+## 10. Audit & Governance
 
 ```ts
-await supabase.from('audit_logs').insert({
+await supabaseAdmin.from('audit_logs').insert({
   entity_type: 'quote',
   entity_id: quoteId,
   action: 'price_updated',
@@ -582,66 +676,79 @@ await supabase.from('audit_logs').insert({
 });
 ```
 
-**Events logged:**
-- Quote created / updated / deleted
-- Channel config saved
-- Pricing calculated
-- Discount entered / modified
-- Approval submitted / approved / rejected / revised
-- PDF generated
-- Config changes (admin)
-- Vendor added / updated (admin)
+**Events logged:** quote CRUD · channel config saved · pricing calculated · discount modified · approval submitted/actioned · PDF generated · config changes · vendor changes
 
 ---
 
-## 10. Implementation Sequence
+## 11. Implementation Sequence (UPDATED in v1.1)
 
 ### Phase 1 — Foundation (Week 1)
-1. Add Supabase to PlanX (`@supabase/supabase-js`)
-2. Run DB migrations (all tables above)
-3. Extend NextAuth session with role from `user_roles`
-4. Role-based middleware
+1. `lib/supabase.ts` — Supabase admin client using `CE_SUPABASE_URL` + `CE_SUPABASE_SERVICE_ROLE_KEY`
+2. Run DB migrations (all tables in §3)
+3. Extend NextAuth session with role lookup from `user_roles`
+4. Role-based middleware for `/pricing/*` routes
 
 ### Phase 2 — Pricing Engine Core (Week 2)
-5. `lib/pricing-engine.ts` — pure calculation function (unit-testable)
-6. API routes: quotes CRUD, channels, calculate
-7. Vendor & pricing config APIs (admin-gated)
+5. `lib/pricing-engine.ts` — pure calculation function
+6. `lib/pricing-insight.ts` — Claude insight using existing `ANTHROPIC_API_KEY`
+7. API routes: quotes CRUD, channels, addons, calculate
+8. Vendor & pricing config APIs (admin-gated)
 
 ### Phase 3 — UI (Week 3)
-8. Quote list page
-9. Channel & Volume form
-10. Pricing & Finalise screen with color indicators
-11. Role-based field visibility (vendor cost redaction)
+9. Quote list page
+10. Channel & Volume form
+11. Pricing & Finalise screen with color indicators + Claude insight
+12. Role-based field visibility (vendor cost redaction)
 
-### Phase 4 — Approval & PDF (Week 4)
-12. Approval workflow APIs + approval screen UI
-13. PDF generation (`@react-pdf/renderer`)
-14. Email notifications on approval trigger
+### Phase 4 — Approval, Notifications & PDF (Week 4)
+13. Approval workflow APIs + approval screen UI
+14. WhatsApp notifications via existing Green API
+15. Email notifications via existing `/api/mailer`
+16. PDF generation (`@react-pdf/renderer`)
 
 ### Phase 5 — Audit & Hardening (Week 5)
-15. Audit log writes on all mutations
-16. Audit log viewer (admin)
-17. Pricing config admin screen
-18. End-to-end testing
+17. Audit log writes on all mutations
+18. Audit log viewer (admin)
+19. Pricing config admin screen
+20. End-to-end testing + Vercel deploy
 
 ---
 
-## 11. New Dependencies
+## 12. Dependencies
 
+### New (to install)
 ```json
 {
-  "@supabase/supabase-js": "^2.x",
   "@react-pdf/renderer": "^3.x",
   "zod": "^3.x"
 }
 ```
 
+### Already in Production (no install needed)
+```json
+{
+  "@supabase/supabase-js": "already configured",
+  "@anthropic-ai/sdk": "already configured"
+}
+```
+
 ---
 
-## 12. Environment Variables (add to `.env.local` + Vercel)
+## 13. Environment Variables
 
+### Already in Vercel Production
 ```
-NEXT_PUBLIC_SUPABASE_URL=
-NEXT_PUBLIC_SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=      # server-only, never exposed to client
+CE_SUPABASE_URL                  ✅ exists
+CE_SUPABASE_SERVICE_ROLE_KEY     ✅ exists
+ANTHROPIC_API_KEY                ✅ exists
+GREEN_API_TOKEN                  ✅ exists
+GREEN_API_INSTANCE               ✅ exists
+WA_BUG_GROUP_ID                  ✅ exists (use as fallback approver group)
+SMTP_HOST / SMTP_PORT / etc.     ✅ exists
+```
+
+### To Add
+```
+PRICING_APPROVER_WA_GROUP_ID=    # WhatsApp group for approval notifications
+                                 # Can reuse WA_BUG_GROUP_ID initially
 ```

@@ -13,8 +13,7 @@
 | 1 | Supabase already connected — env vars `CE_SUPABASE_URL` + `CE_SUPABASE_SERVICE_ROLE_KEY` exist in production | Vercel env audit |
 | 2 | Use `CE_` prefix for all Supabase env vars (not `NEXT_PUBLIC_SUPABASE_*`) | Vercel env audit |
 | 3 | Anthropic Claude available (`ANTHROPIC_API_KEY`) — replace xAI for pricing insights | Vercel env audit |
-| 4 | WhatsApp notifications available via Green API (`GREEN_API_TOKEN`, `GREEN_API_INSTANCE`, `WA_BUG_GROUP_ID`) | Vercel env audit |
-| 5 | SMTP mailer already built (`/api/mailer`) — reuse for approval email notifications | Existing code |
+| 4 | SMTP mailer already built (`/api/mailer`) — reuse for approval email notifications | Existing code |
 | 6 | Phase 1 updated — Supabase client setup only (credentials exist, no fresh project needed) | Vercel env audit |
 
 ---
@@ -463,36 +462,9 @@ function redactForRole(data: PricingResult, role: string) {
 
 ---
 
-## 6. Notification System (UPDATED in v1.1)
+## 6. Notification System
 
-Both notification channels are **already live in production** — no new setup required.
-
-### 6.1 WhatsApp (Green API) — Primary
-
-Reuse the existing Green API integration (`GREEN_API_TOKEN`, `GREEN_API_INSTANCE`).
-
-**Approval request notification to approver:**
-```
-🔔 *Approval Required*
-Quote: NRM-2026-0042
-Customer: Acme Corp
-Sales: john@credresolve.com
-Margin: 18.2% 🟡
-Reason: Discount exceeds permissible limit
-→ Review: https://planx-psi.vercel.app/pricing/NRM-2026-0042/approval
-```
-
-**Approval outcome notification to sales:**
-```
-✅ *Quote Approved*   /   ❌ *Quote Rejected*   /   🔄 *Revision Requested*
-Quote: NRM-2026-0042
-Reviewed by: manager@credresolve.com
-Remarks: [remarks text]
-```
-
-### 6.2 Email (SMTP) — Secondary
-
-Reuse existing `/api/mailer` route for email fallback and formal record.
+Email via existing SMTP mailer (`/api/mailer`) — already live in production, no new setup required.
 
 **Trigger points:**
 - Quote submitted for approval → email to approver group
@@ -634,14 +606,14 @@ Footer (all pages): Confidential — Not for distribution
               ┌────────▼────────┐
               │ pending_approval │  ← approval_required = true
               └────────┬────────┘
-           WhatsApp + Email sent to approvers
+           Email sent to approvers
                        │
           ┌────────────┼────────────┐
           │            │            │
     ┌─────▼─────┐  ┌───▼───┐  ┌────▼──────────────┐
     │ approved  │  │rejected│  │revision_requested  │
     └─────┬─────┘  └───────┘  └────────┬───────────┘
-  WA+Email to sales               WA+Email to sales
+  Email to sales               Email to sales
           │                            │
     ┌─────▼──────┐              [Sales edits & resubmits]
     │ finalized  │                     │
@@ -702,9 +674,8 @@ await supabaseAdmin.from('audit_logs').insert({
 
 ### Phase 4 — Approval, Notifications & PDF (Week 4)
 13. Approval workflow APIs + approval screen UI
-14. WhatsApp notifications via existing Green API
-15. Email notifications via existing `/api/mailer`
-16. PDF generation (`@react-pdf/renderer`)
+14. Email notifications via existing `/api/mailer`
+15. PDF generation (`@react-pdf/renderer`)
 
 ### Phase 5 — Audit & Hardening (Week 5)
 17. Audit log writes on all mutations
@@ -741,14 +712,10 @@ await supabaseAdmin.from('audit_logs').insert({
 CE_SUPABASE_URL                  ✅ exists
 CE_SUPABASE_SERVICE_ROLE_KEY     ✅ exists
 ANTHROPIC_API_KEY                ✅ exists
-GREEN_API_TOKEN                  ✅ exists
-GREEN_API_INSTANCE               ✅ exists
-WA_BUG_GROUP_ID                  ✅ exists (use as fallback approver group)
 SMTP_HOST / SMTP_PORT / etc.     ✅ exists
 ```
 
 ### To Add
 ```
-PRICING_APPROVER_WA_GROUP_ID=    # WhatsApp group for approval notifications
-                                 # Can reuse WA_BUG_GROUP_ID initially
+PRICING_APPROVER_EMAILS=         # Comma-separated approver email addresses
 ```

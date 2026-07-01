@@ -24,20 +24,22 @@ async function batchedMap<T, R>(items: T[], fn: (item: T) => Promise<R>, batchSi
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const enrich = searchParams.get("enrich") === "1";
+  const refresh = searchParams.get("refresh") === "1";
+  const noCache = { noCache: refresh };
 
   try {
-    const projects: any[] = arr(await client.listProjects(WS));
+    const projects: any[] = arr(await client.listProjects(WS, noCache));
 
     const enriched = await Promise.all(projects.map(async (project: any) => {
       const pid = project.id;
 
       const [issues, states, labels, cycles, mods, members] = await Promise.all([
-        client.listIssues(WS, pid).then(arr),
-        client.listStates(WS, pid).then(arr),
-        client.listLabels(WS, pid).then(arr),
-        client.listCycles(WS, pid).then(arr),
-        client.listModules(WS, pid).then(arr),
-        client.listProjectMembers(WS, pid).then(arr),
+        client.listIssues(WS, pid, "", noCache).then(arr),
+        client.listStates(WS, pid, noCache).then(arr),
+        client.listLabels(WS, pid, noCache).then(arr),
+        client.listCycles(WS, pid, noCache).then(arr),
+        client.listModules(WS, pid, noCache).then(arr),
+        client.listProjectMembers(WS, pid, noCache).then(arr),
       ]);
 
       const stateMap  = toMap(states, "id");
@@ -54,7 +56,7 @@ export async function GET(req: Request) {
 
       if (enrich) {
         const cycleResults = await batchedMap(cycles, async (c: any) => {
-          const items = arr(await client.listCycleIssues(WS, pid, c.id).catch(() => []));
+          const items = arr(await client.listCycleIssues(WS, pid, c.id, noCache).catch(() => []));
           const cy = cycleMap[c.id];
           const end_date = cy?.end_date ?? cy?.ended_at ?? null;
           // API returns full issue objects — the issue ID is in the `id` field
@@ -65,7 +67,7 @@ export async function GET(req: Request) {
             if (iid) issueCycle[iid] = { name, end_date };
 
         const modResults = await batchedMap(mods, async (m: any) => {
-          const items = arr(await client.listModuleIssues(WS, pid, m.id).catch(() => []));
+          const items = arr(await client.listModuleIssues(WS, pid, m.id, noCache).catch(() => []));
           // API returns full issue objects — the issue ID is in the `id` field
           return items.map((mi: any) => ({ iid: mi.id ?? mi.issue ?? mi.issue_id, name: moduleMap[m.id]?.name ?? m.id }));
         });
@@ -145,7 +147,7 @@ export async function GET(req: Request) {
           labels: Array.from(labelSet),
         },
       },
-      { headers: { "Cache-Control": "s-maxage=300, stale-while-revalidate=60" } }
+      { headers: { "Cache-Control": refresh ? "no-store" : "s-maxage=300, stale-while-revalidate=60" } }
     );
   } catch (err: any) {
     console.error("Plane API error:", err);

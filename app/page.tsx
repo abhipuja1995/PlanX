@@ -1499,7 +1499,7 @@ export default function PlaneDashboard() {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     setError(null);
-    return fetch("/api/issues")
+    return fetch(isRefresh ? "/api/issues?refresh=1" : "/api/issues")
       .then(r => r.json())
       .then(data => {
         if (data.error) throw new Error(data.error);
@@ -1510,7 +1510,7 @@ export default function PlaneDashboard() {
         setLastUpdated(new Date());
 
         setEnriching(true);
-        return fetch("/api/issues?enrich=1")
+        return fetch(isRefresh ? "/api/issues?enrich=1&refresh=1" : "/api/issues?enrich=1")
           .then(r => r.json())
           .then(enriched => {
             if (enriched.error) return;

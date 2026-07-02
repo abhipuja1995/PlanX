@@ -15,6 +15,7 @@ FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+RUN mkdir -p public
 
 # Disable Next.js telemetry during build
 ENV NEXT_TELEMETRY_DISABLED 1

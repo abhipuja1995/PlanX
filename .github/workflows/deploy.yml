@@ -98,11 +98,31 @@ jobs:
             
             # Run the new containers
             ENV_FILE="$HOME/planx/.env"
+            
+            # 1. Resolve NEXTAUTH_SECRET (from .env, GitHub Secrets, or generated on the fly)
+            PERSISTED_SECRET=""
+            if [ -f "$ENV_FILE" ]; then
+              PERSISTED_SECRET=$(grep -E "^NEXTAUTH_SECRET=" "$ENV_FILE" | cut -d'=' -f2-)
+            fi
+            
+            if [ -z "$PERSISTED_SECRET" ]; then
+              if [ -n "${{ secrets.NEXTAUTH_SECRET }}" ]; then
+                SH_NEXTAUTH_SECRET="${{ secrets.NEXTAUTH_SECRET }}"
+              else
+                SH_NEXTAUTH_SECRET=$(openssl rand -base64 32)
+                echo "No NEXTAUTH_SECRET found. Generated dynamic secret on the fly."
+              fi
+            else
+              SH_NEXTAUTH_SECRET="$PERSISTED_SECRET"
+            fi
+
+            # 2. Run containers with the secret passed in
             if [ -f "$ENV_FILE" ]; then
               sudo docker run -d \
                 --name planx-frontend \
                 --restart always \
                 -p 4200:3000 \
+                -e NEXTAUTH_SECRET="$SH_NEXTAUTH_SECRET" \
                 --env-file "$ENV_FILE" \
                 prashanth1003/planx:latest
 
@@ -110,20 +130,23 @@ jobs:
                 --name planx-backend \
                 --restart always \
                 -p 4211:3000 \
+                -e NEXTAUTH_SECRET="$SH_NEXTAUTH_SECRET" \
                 --env-file "$ENV_FILE" \
                 prashanth1003/planx:latest
             else
-              echo "WARNING: .env file not found at $ENV_FILE. Starting containers without custom env vars."
+              echo "WARNING: .env file not found at $ENV_FILE. Starting containers with dynamic/injected env vars."
               sudo docker run -d \
                 --name planx-frontend \
                 --restart always \
                 -p 4200:3000 \
+                -e NEXTAUTH_SECRET="$SH_NEXTAUTH_SECRET" \
                 prashanth1003/planx:latest
 
               sudo docker run -d \
                 --name planx-backend \
                 --restart always \
                 -p 4211:3000 \
+                -e NEXTAUTH_SECRET="$SH_NEXTAUTH_SECRET" \
                 prashanth1003/planx:latest
             fi
             

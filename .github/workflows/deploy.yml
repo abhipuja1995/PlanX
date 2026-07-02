@@ -91,25 +91,40 @@ jobs:
             # Clean up the transferred archive
             rm -f ~/planx-deploy/planx.tar.gz
             
-            # Stop and remove existing container if running
-            docker stop planx || true
-            docker rm planx || true
+            # Stop and remove existing containers if running
+            docker stop planx-frontend || true
+            docker rm planx-frontend || true
+            docker stop planx-backend || true
+            docker rm planx-backend || true
             
-            # Run the new container
+            # Run the new containers
             ENV_FILE="$HOME/planx/.env"
             if [ -f "$ENV_FILE" ]; then
               docker run -d \
-                --name planx \
+                --name planx-frontend \
                 --restart always \
-                -p 3000:3000 \
+                -p 4200:3000 \
+                --env-file "$ENV_FILE" \
+                planx:latest
+
+              docker run -d \
+                --name planx-backend \
+                --restart always \
+                -p 4211:3000 \
                 --env-file "$ENV_FILE" \
                 planx:latest
             else
-              echo "WARNING: .env file not found at $ENV_FILE. Starting container without custom env vars."
+              echo "WARNING: .env file not found at $ENV_FILE. Starting containers without custom env vars."
               docker run -d \
-                --name planx \
+                --name planx-frontend \
                 --restart always \
-                -p 3000:3000 \
+                -p 4200:3000 \
+                planx:latest
+
+              docker run -d \
+                --name planx-backend \
+                --restart always \
+                -p 4211:3000 \
                 planx:latest
             fi
             

@@ -6,8 +6,8 @@ export class PlaneClient {
   private baseUrl: string;
 
   constructor(apiKey: string, baseUrl: string) {
-    this.apiKey = apiKey;
-    this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.apiKey = apiKey || "";
+    this.baseUrl = (baseUrl || "").replace(/\/$/, "");
   }
 
   async request(method: string, path: string, body?: object, opts: ReqOpts = {}) {

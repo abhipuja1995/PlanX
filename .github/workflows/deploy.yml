@@ -85,28 +85,28 @@ jobs:
             mkdir -p ~/planx
             
             # Log in to Docker Hub on EC2 (required for private repos)
-            echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u prashanth1003 --password-stdin || true
+            echo "${{ secrets.DOCKER_PASSWORD }}" | sudo docker login -u prashanth1003 --password-stdin || true
             
             # Pull the new image from Docker Hub
-            docker pull prashanth1003/planx:latest
+            sudo docker pull prashanth1003/planx:latest
             
             # Stop and remove existing containers if running
-            docker stop planx-frontend || true
-            docker rm planx-frontend || true
-            docker stop planx-backend || true
-            docker rm planx-backend || true
+            sudo docker stop planx-frontend || true
+            sudo docker rm planx-frontend || true
+            sudo docker stop planx-backend || true
+            sudo docker rm planx-backend || true
             
             # Run the new containers
             ENV_FILE="$HOME/planx/.env"
             if [ -f "$ENV_FILE" ]; then
-              docker run -d \
+              sudo docker run -d \
                 --name planx-frontend \
                 --restart always \
                 -p 4200:3000 \
                 --env-file "$ENV_FILE" \
                 prashanth1003/planx:latest
 
-              docker run -d \
+              sudo docker run -d \
                 --name planx-backend \
                 --restart always \
                 -p 4211:3000 \
@@ -114,13 +114,13 @@ jobs:
                 prashanth1003/planx:latest
             else
               echo "WARNING: .env file not found at $ENV_FILE. Starting containers without custom env vars."
-              docker run -d \
+              sudo docker run -d \
                 --name planx-frontend \
                 --restart always \
                 -p 4200:3000 \
                 prashanth1003/planx:latest
 
-              docker run -d \
+              sudo docker run -d \
                 --name planx-backend \
                 --restart always \
                 -p 4211:3000 \
@@ -128,7 +128,7 @@ jobs:
             fi
             
             # Clean up dangling images
-            docker image prune -f
+            sudo docker image prune -f
           EOF
 
       # Step 8: Clean up / Revoke Runner IP from Bastion SG (Runs ALWAYS)
